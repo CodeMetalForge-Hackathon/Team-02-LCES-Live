@@ -2,9 +2,10 @@
 
 Pure computation, no MQTT. engine.py feeds it live data.
 
-Routing decision for the demo (§4.6): routes are the hand-drawn LineStrings in
-routes.geojson, each evaluated on its own along its densified points (no off-trail grid,
-no pgRouting). "Rerouting" = switching the active route to the one with the best margin.
+Routes: with data/yarnell/graph.npz (build_graph.py), the fastest route from the crew's cell to
+each safety zone over the routing graph (graph_routes, ADR 0001). Without it (v1, testing only),
+the LineStrings in routes.geojson, each evaluated on its own along its densified points.
+"Rerouting" = switching the active route to the one with the best margin.
 """
 import json
 import math
@@ -14,7 +15,9 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Transformer
+from rasterio.transform import from_origin
 
+import build_graph
 import config
 from fire_model import Spread, Weather, arrival_min
 
@@ -87,6 +90,19 @@ class Terrain:
         return code
 
 
+class GraphTerrain(Terrain):
+    """Terrain from graph.npz. Its fuel already has SH5 inside the 2013 perimeter, so no scenario override."""
+
+    def __init__(self, g: dict):
+        self.layers = {"dem": g["elev"], "slope": g["slope"], "aspect": g["aspect"], "fuel": g["fuel"]}
+        self._inverse = ~from_origin(float(g["x0"]), float(g["ytop"]), float(g["res"]), float(g["res"]))
+        self.rows, self.cols = g["elev"].shape
+
+    @staticmethod
+    def _scenario_fuel(code: int) -> int:
+        return code
+
+
 @dataclass
 class Route:
     id: str
@@ -100,6 +116,10 @@ class Route:
 
     def lonlat(self, i: int) -> tuple[float, float]:
         return to_lonlat(*self.xy[i])
+
+    def path_lonlat(self) -> list[list[float]]:
+        lon, lat = _TO_LONLAT.transform(self.xy[:, 0], self.xy[:, 1])
+        return [[round(a, 6), round(b, 6)] for a, b in zip(lon, lat)]
 
     def crew_seconds(self, crew_xy) -> tuple[int, np.ndarray]:
         """(start index, seconds from the crew to every point from there on).
@@ -155,6 +175,47 @@ def load_routes(path: Path, terrain: Terrain) -> list[Route]:
                             xy=xy, seg_s=np.array(seg_s), factor=factor))
     if not routes:
         raise ValueError(f"{path}: no routes")
+    return routes
+
+
+def load_graph(path: Path = config.GRAPH_FILE) -> dict:
+    """graph.npz + the sparse matrix (edge costs) and which vertices have any edge."""
+    g = dict(np.load(path))
+    g["_m"] = build_graph.matrix(g)
+    g["_ok"] = np.bincount(g["src"], minlength=len(g["x"])) > 0
+    return g
+
+
+def crew_start_xy(path: Path = config.SCENARIO_FILE) -> tuple[float, float]:
+    """The descent point (the spec's "saddle"): crew start at 16:20."""
+    f = next(f for f in json.loads(Path(path).read_text())["features"]
+             if f["properties"]["name"] == "Descent point (crew start)")
+    return to_utm(*f["geometry"]["coordinates"][:2])
+
+
+# (route id, safety zone name, graph key of its cells, radius for the 4 x flame check)
+SAFETY_ZONES = (("ranch", "Boulder Springs Ranch", "ranch", build_graph.RANCH_RADIUS_M),
+                ("black", "the black", "black0", 500))
+
+
+def graph_routes(g: dict, crew_xy) -> list[Route]:
+    """Fastest route from the crew's cell to each safety zone. Times are the graph's edge costs."""
+    n = int(g["elev"].size)
+    start = build_graph.cell(g, *crew_xy)
+    if not g["_ok"][start]:              # impassable cell (steep, building): start from the nearest open one
+        open_ = np.flatnonzero(g["_ok"][:n])
+        start = int(open_[np.argmin(np.hypot(g["x"][open_] - crew_xy[0], g["y"][open_] - crew_xy[1]))])
+    veg = g["veg"].ravel()
+    routes = []
+    for rid, to, key, radius in SAFETY_ZONES:
+        _, path = build_graph.route(g, start, g[key])
+        if not path:
+            continue
+        path = np.array(path)
+        seg_s = np.asarray(g["_m"][path[:-1], path[1:]]).ravel()
+        factor = np.where(path < n, veg[np.minimum(path, n - 1)], config.TRAIL_FACTOR)
+        routes.append(Route(rid, f"To {to}", to, False, radius,
+                            np.column_stack([g["x"][path], g["y"][path]]), seg_s, factor))
     return routes
 
 

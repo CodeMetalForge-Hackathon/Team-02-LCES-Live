@@ -28,7 +28,7 @@ Core question the system answers, continuously:
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
-| Margin engine (`engine.py`) | **v1 working with placeholder routes/nodes (§5.6):** pyrothermel spread from each fire point, Tobler crew times on hand-drawn routes, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass (`test_margin.py`); verified end to end with the simulator. **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek | Real `nodes.json` / `routes.geojson`; build pyrothermel on the Pi; move v1 toward v2 (gap list in §5.6) |
+| Margin engine (`engine.py`) | **v1 working, testing only (§5.6):** pyrothermel spread from each spot fire, Tobler crew times on fixed routes, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass (`test_margin.py`). Since Nov 8 on the real `nodes.json` and graph-exported `routes.geojson` (`ranch`, `black`). Can't run the demo story (no fire from the black). **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek + Person A | Fire spread from the black (§2.4); engine routes over `graph.npz` (§9 track 8); build pyrothermel on the Pi |
 | Flame sensor, LoRa link, thermal lookout, crew tag | **Cut (Nov 8)** | — | — |
 | Node placement (fake GPS per node, §1.4) | **Decided Nov 8:** N1 on the ridge near the saddle, N2 in the box canyon, N3 between canyon and ranch | TBD | Pick exact lat/lon on the map |
 
@@ -471,6 +471,12 @@ This is the **v2 target** format. What the v1 engine publishes today is in §5.6
 ### 5.6 Implemented now: v1 engine (`engine.py`, Vivek, Sun Nov 8)
 Built before the Nov 8 v2 design (§2.4, §4.6, ADR 0001/0002) and runnable today, so the dashboard can be built against it. **Simplification:** no off-trail grid, no scipy/pgRouting graph, no PostGIS dependency. Each hand-drawn route in `routes.geojson` is evaluated on its own along its points (densified to 25 m); "rerouting" = switching the active route. The fire spreads in straight lines from each fire point (the original §2.4), not by minimum travel time.
 
+**Update Nov 8 (after the pull): v1 is for testing, not the demo.**
+- Inputs are now real: `data/yarnell/nodes.json` and `data/yarnell/routes.geojson`, exported from the graph by `uv run python build_graph.py --routes` (fastest route from the descent point to each safety zone: `ranch` 28.1 min, `black` 18.8 min; v1's walking times match the graph's). The placeholders are no longer loaded.
+- The demo follows the spec story in its order (fan on N1 turns the fire from the black's edge → ranch red → reroute to the black; then hair dryer on N2; then unplug N3). v1 can't do this: it has no fire from the black, only spot fires. With the real N2 (box canyon, on the descent line), a spot fire at N2 or N3 turns `ranch` red at once whatever the wind (checked: N2, wind 270° → `ranch` −26 min, 180° → −17 min; `black` stays green). The hair dryer beat never replaces the fan beat.
+- Needed for the demo: fire spread from the black (§2.4, ADR 0002), then closures + the reroute loop (§5.4).
+- **Update Nov 8, later:** `black0` is in `graph.npz` and the engine now routes over it when `data/yarnell/graph.npz` exists (§9 track 8b). Crew times along a route are the graph's own step times, so the blended `travel_factor` flaw of `routes.geojson` is gone in this mode. Each route in `engine/state` has `path`. Fire is still v1 (straight-line spread from spot fires); with a spot fire at N2, wind 270° at 7.5 m/s: `ranch` margin −25.3 min red (ETA 28.1; fire reaches the ranch end at 2.8 min), `black` margin +53.9 min green (ETA 18.8; worst point is the crew's own cell, fire there at 53.9 min). The 2.8 min over ~740 m (≈ 260 m/min, incl. the 1.5 safety factor and the 4 × flame buffer) is v1's straight-line spread; don't quote it, task 8c replaces it. `routes.geojson` + `load_routes` remain only as the no-graph fallback (and `test_margin.py`'s placeholder checks).
+
 | File | What it does |
 |---|---|
 | `config.py` | Every tunable number: thresholds, safety factor, worst-case values, travel factors, scenario (`"2013"` = SH5 everywhere except non-burnable; `"today"` = LF2025 `fuel.tif`) |
@@ -517,6 +523,7 @@ Verified Sun Nov 8 with the placeholder data (local Mosquitto + simulator, ~30 m
            "head_dir":354.3,"flame_m":24.7,"omni":false,"burnable":true}],
  "alerts":["REROUTED: R1 -> R2 (R1 margin -15.5 min, R2 60.1 min)"]}
 ```
+- `eta_min` = crew walking time to the safety zone. `margin_min` = min over the route's points of (fire arrival − crew arrival), minutes; it is not a travel time.
 - `margin_min` / `worst` are `null` when no fire threatens the route (status green). `worst` = the point that sets the margin: draw it on the map.
 - Route geometry isn't sent: the dashboard draws `routes.geojson` and colours each route by `id` → `status`. Use the same file the engine loaded (real or placeholder).
 - `leave_by_ts` = `now + margin − 2 min` for the active route (unix s; in the past = "LEAVE NOW" alert). `null` without a fire.
@@ -538,7 +545,7 @@ Verified Sun Nov 8 with the placeholder data (local Mosquitto + simulator, ~30 m
 | Worst case | `WORST_WIND_MS` 10, `WORST_TEMP_C` 38, `WORST_RH` 8 | 13 m/s, 40 °C, 8 % (§5.3) |
 | 2013 fuel | SH5 everywhere (burnable cells) | SH5 inside the 2013 perimeter only |
 | Crew | Fixed at the first route's start (or `engine/cmd` crew) | Scenario simulator walks the 2013 descent line from the saddle at 16:20 |
-| `engine/state` | No `path`, no `areas`; fires have `age_s`; extra `weather`, `crew`, `worst`, `eta_min` | `path` per route, `areas` (black / burning / +5 / +10 min), fires with `ignition_ts` (§5.5) |
+| `engine/state` | `path` per route (graph mode, Nov 8); no `areas`; fires have `age_s`; extra `weather`, `crew`, `worst`, `eta_min` | `path` per route, `areas` (black / burning / +5 / +10 min), fires with `ignition_ts` (§5.5) |
 
 **Open (decide with the team):** `WORST_WIND_MS = 10` with an unknown direction is already harsh: in dry SH5 any stale node turns every placeholder route red (head ROS ~480 m/min). Lower it, or use e.g. 1.5 × the current max, if the demo should show "margin drops" rather than "no safe route". The v2 plan raises it to 13.
 
@@ -739,7 +746,7 @@ mosquitto_sub -h localhost -t 'sensors/#' -v
 cd ~/fire && uv run python simulator.py --wind-shift-after 30 --silent-after 60
 ```
 Verified: seq 0–2 calm at 270°, ~2 m/s; seq 3 (t = 30 s) 180°, ~7.5 m/s, temp up, RH down; N3 stops after 60 s. For local dev, install Mosquitto on your laptop and run the same script; topics and format are identical.
-- **Spot fire** (added Nov 8 for the v1 engine, §5.6): `--fire-after <s>` publishes one fire point to `sensors/SIM/fire` at `--fire-node` (default N2); `-1` = never. Messages in the repo's `simulator.py` carry `"_simulated": true`.
+- **Spot fire** (added Nov 8 for the v1 engine, §5.6; **testing only, not the demo story**): `--fire-after <s>` publishes one fire point to `sensors/SIM/fire` at `--fire-node` (default N2); `-1` = never. Messages in the repo's `simulator.py` carry `"_simulated": true`.
 
 ### 8.5 WebSocket server → dashboard contract
 `ws_server.py` (FastAPI) subscribes to `sensors/#`, `engine/#`, and `crew/#` and pushes every message to the dashboard. The implementation is now in the repository root; the Appendix B code is retained as the original reference. Each WebSocket message:
@@ -766,7 +773,8 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - [x] Staleness (fresh / aging / stale) + worst-case values, inside the v1 margin engine (§5.3, §5.6)
 - [x] v1 margin engine on hand-drawn routes, `engine/state` format documented (§5.6); placeholder data until `nodes.json` / `routes.geojson` exist
 - [x] RH/temp → 1-h fuel moisture table (`fire_model.py`; verify the table against the source)
-- [ ] Move the v1 engine toward v2: see the gap list in §5.6
+- [x] v1 engine on real `nodes.json` + graph-exported `routes.geojson` (Nov 8; `uv.lock` conflict markers fixed)
+- [ ] Move the v1 engine toward v2: see the gap list in §5.6 and track item 8 below
 - [x] Coordinates decided: fake GPS per node, no tabletop transform (§1.4)
 - [x] Margin engine, fire spread and routing design settled (Nov 8 grilling; `docs/GLOSSARY.md`, `docs/adr/`, spec in `docs/specs/escape-margin/`)
 - [ ] Map + routing track: see the ordered list below
@@ -782,10 +790,12 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
 6. [x] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
-8. [ ] **Margin engine:** fire spread (§2.4) + closures (§5.4) + `engine/state` (§5.5), with the fire and margin checks in §7. A v1 on hand-drawn routes already runs (§5.6); it is the fallback for the demo if the graph isn't ready.
+8. [ ] **Margin engine (Person A joins Vivek here, Nov 8):** in order (a) ~~`black0` cells in `graph.npz`~~ done Nov 8 (2,581 cells; descent point → black0 18.8 min, asserted in `build_graph.py`); (b) ~~engine routes over `graph.npz`~~ done Nov 8: `margin.load_graph` / `GraphTerrain` (terrain/fuel from the graph, no "SH5 everywhere" override) / `graph_routes` (crew cell → `ranch` / `black0` with `route()`, `seg_s` = the graph's edge costs, re-planned when the crew changes cell), `path` per route in `engine/state`; checks in `test_margin.py` (16 pass); 8 ms per recompute, 35 ms with a re-plan; (c) fire spread from the black over the grid (§2.4); (d) closures + reroute loop (§5.4); (e) `engine/state` per §5.5, with the fire and margin checks in §7. v1 (§5.6) is for testing only; `routes.geojson` (`build_graph.py --routes`) feeds it meanwhile.
 9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
+10. [ ] **Scenario simulator:** publish the crew position walking the 2013 descent line from the descent point at 16:20, real time, ignoring reroutes (spec "Scenario simulator").
 
 **Housekeeping**
+- [ ] Once fire spread + closures run on the graph (track 8c–d): delete `build_graph.py --routes` / `export_routes()`, `data/yarnell/routes.geojson` and the `travel_factor` path in `margin.load_routes` (the v1 placeholder checks still use `load_routes`).
 - [ ] Move `docs/USGS_13_n35w113.tif` (440 MB) to `data/raw/` and add `data/raw/` to `.gitignore`.
 - [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LANDFIRE download; keep the online services as a cross-check (§3.2).
 - [ ] Mark north on the floor where the wind sensor sits (fan directions must match compass directions; §1.3, §1.4).

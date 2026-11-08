@@ -12,6 +12,8 @@ DATA = Path(__file__).parent / "data" / "yarnell"
 NODES_FILE = DATA / "nodes.json"
 ROUTES_FILE = DATA / "routes.geojson"
 PLACEHOLDER_DIR = DATA / "placeholder"
+GRAPH_FILE = DATA / "graph.npz"          # build_graph.py; when present, routes come from it
+SCENARIO_FILE = DATA / "scenario.geojson"
 RASTERS = {name: DATA / f"{name}.tif" for name in ("dem", "slope", "aspect", "fuel")}
 
 # ---- Scenario ---------------------------------------------------------------

@@ -225,6 +225,8 @@ def build_yarnell():
     rx, ry = utm(*RANCH)
     n = CROP_CELLS * CROP_CELLS
     g["ranch"] = np.flatnonzero(np.hypot(g["x"][:n] - rx, g["y"][:n] - ry) <= RANCH_RADIUS_M)
+    sc = {f["properties"]["name"]: f for f in json.loads((YARNELL / "scenario.geojson").read_text())["features"]}
+    g["black0"] = np.flatnonzero(burn([sc["the black"]["geometry"]]).ravel())  # the black at 16:00 (spec)
     g.update(elev=elev, slope=slope, aspect=aspect, fuel=fuel, veg=veg, blocked=blocked)
     np.savez_compressed(YARNELL / "graph.npz", **g)
 
@@ -234,6 +236,10 @@ def build_yarnell():
     print(f"crop x0={x0} ytop={ytop}; vertices {len(g['x'])} (trail {len(g['x']) - n}); "
           f"edges {len(g['src'])}; blocked cells {blocked.sum()}; ranch cells {len(g['ranch'])}")
     print(f"deployment site -> ranch: {t / 60:.1f} min over {len(path)} vertices")
+    dx, dy = utm(*sc["Descent point (crew start)"]["geometry"]["coordinates"][::-1])
+    t, _ = route(g, cell(g, dx, dy), g["black0"])
+    print(f"black0 cells {len(g['black0'])}; descent point -> black0: {t / 60:.1f} min")
+    assert len(g["black0"]) > 2000 and 15 < t / 60 < 22, (len(g["black0"]), t)
 
     # calibration print: the 2013 descent line walked at this veg factor (SAIT: ~20 min)
     sc = json.loads((YARNELL / "scenario.geojson").read_text())["features"]
@@ -248,18 +254,14 @@ def export_routes():
     """Fastest routes from the crew start to each safety zone -> routes.geojson (engine v1 format, margin.py).
 
     ponytail: fixed routes for engine v1; the v2 engine routes over graph.npz itself (ADR 0001)."""
-    from rasterio.features import rasterize
-    from rasterio.transform import from_origin
-    from rasterio.warp import transform, transform_geom
+    from rasterio.warp import transform
 
     g = dict(np.load(YARNELL / "graph.npz"))
     nr, nc = g["shape"]
     sc = {f["properties"]["name"]: f for f in json.loads((YARNELL / "scenario.geojson").read_text())["features"]}
     (sx,), (sy,) = transform("EPSG:4326", "EPSG:32612", *([c] for c in sc["Descent point (crew start)"]["geometry"]["coordinates"]))
-    black = rasterize([transform_geom("EPSG:4326", "EPSG:32612", sc["the black"]["geometry"])], out_shape=(nr, nc),
-                      transform=from_origin(float(g["x0"]), float(g["ytop"]), RES, RES))
     zones = [("ranch", "Boulder Springs Ranch", g["ranch"], RANCH_RADIUS_M),
-             ("black", "the black (16:00)", np.flatnonzero(black.ravel()), 500)]
+             ("black", "the black (16:00)", g["black0"], 500)]
     zg = np.concatenate([g["elev"].ravel(), [g["elev"].ravel()[cell(g, x, y)] for x, y in
                                              zip(g["x"][nr * nc:], g["y"][nr * nc:])]])
     feats = []

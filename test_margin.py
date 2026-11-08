@@ -2,7 +2,8 @@
 
 Run:  uv run --group engine python test_margin.py      (or: uv run --group engine --with pytest pytest test_margin.py)
 
-Uses the real Yarnell rasters and the placeholder nodes/routes in data/yarnell/placeholder/.
+Uses the real Yarnell rasters and the placeholder nodes/routes in data/yarnell/placeholder/;
+the graph checks use data/yarnell/graph.npz (build_graph.py) and the real nodes.json.
 """
 import json
 import math
@@ -13,7 +14,10 @@ import config
 import fire_model
 from engine import MarginEngine, load_nodes
 from fire_model import Spread, Weather, arrival_min, one_hour_moisture
-from margin import FirePoint, Terrain, evaluate, load_routes, spreads_for, tobler_kmh
+import build_graph
+import numpy as np
+from margin import (FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
+                    load_routes, spreads_for, tobler_kmh, to_lonlat)
 
 TERRAIN = Terrain()
 NODES_FILE = config.PLACEHOLDER_DIR / "nodes.json"
@@ -186,6 +190,44 @@ def test_state_is_json_serialisable():
     feed(eng, 0, **SHIFT)
     eng.on_fire({"type": "fire", "src": "THERM1", "lat": 34.2100, "lon": -112.7710, "conf": 0.9}, 0)
     json.dumps(eng.compute(5), allow_nan=False)
+
+
+# ---- engine over the routing graph (§9 track 8b) -----------------------------------------
+GRAPH = load_graph()
+
+
+def test_graph_routes_use_graph_times_and_send_path():
+    start = crew_start_xy()
+    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, start), load_nodes(config.NODES_FILE),
+                       graph=GRAPH)
+    s = eng.compute(0)
+    c = build_graph.cell(GRAPH, *start)
+    for r, key in (("ranch", "ranch"), ("black", "black0")):
+        t, path = build_graph.route(GRAPH, c, GRAPH[key])
+        route = next(x for x in eng.routes if x.id == r)
+        cum = np.concatenate([[0], np.cumsum(route.seg_s)])
+        assert abs(cum[-1] - t) < 1e-6, (r, cum[-1], t)           # the engine walks the graph's times
+        assert route.xy.shape[0] == len(path)
+        sr = route_by_id(s, r)
+        assert abs(sr["eta_min"] - t / 60) < 0.2 and len(sr["path"]) == len(path)
+    assert route_by_id(s, "black")["eta_min"] < route_by_id(s, "ranch")["eta_min"]   # 18.8 vs 28.1 min
+    lon, lat = to_lonlat(*start)
+    assert abs(route_by_id(s, "ranch")["path"][0][0] - lon) < 1e-4
+    # crew walks 300 m along the ranch route: routes are re-planned from there, ETA drops
+    ranch = next(x for x in eng.routes if x.id == "ranch")
+    i = int(np.searchsorted(np.cumsum(np.hypot(*np.diff(ranch.xy, axis=0).T)), 300))
+    eng.on_crew(dict(zip(("lon", "lat"), to_lonlat(*ranch.xy[i]))), 1)
+    s2 = eng.compute(1)
+    assert route_by_id(s2, "ranch")["eta_min"] < route_by_id(s, "ranch")["eta_min"] - 3
+
+
+def test_graph_terrain_keeps_lf2025_fuel_outside_the_perimeter():
+    t = GraphTerrain(GRAPH)
+    fuel = GRAPH["fuel"]
+    burnable_other = (fuel != config.REPLAY_FUEL) & ~np.isin(fuel, list(config.NON_BURNABLE))
+    r, c = np.argwhere(burnable_other)[0]
+    x, y = GRAPH["x"][r * fuel.shape[1] + c], GRAPH["y"][r * fuel.shape[1] + c]
+    assert t.fuel(x, y) == fuel[r, c] != config.REPLAY_FUEL    # no "SH5 everywhere" override
 
 
 if __name__ == "__main__":

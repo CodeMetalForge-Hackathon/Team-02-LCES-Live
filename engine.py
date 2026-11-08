@@ -21,7 +21,9 @@ from dotenv import load_dotenv
 
 import config
 from fire_model import MODEL_NAME, Weather
-from margin import FirePoint, Terrain, evaluate, load_routes, spreads_for, status_for, to_lonlat, to_utm
+import build_graph
+from margin import (FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
+                    load_routes, spreads_for, status_for, to_lonlat, to_utm)
 
 MISSING = {-1, -99}
 
@@ -60,11 +62,14 @@ def load_nodes(path: Path) -> dict[str, dict]:
 
 
 class MarginEngine:
-    def __init__(self, terrain: Terrain, routes, nodes: dict[str, dict], placeholder: bool = False):
+    def __init__(self, terrain: Terrain, routes, nodes: dict[str, dict], placeholder: bool = False,
+                 graph: dict | None = None):
+        """graph: routing graph (margin.load_graph); routes are then re-planned from the crew's cell."""
         self.terrain, self.routes, self.nodes, self.placeholder = terrain, routes, nodes, placeholder
+        self.graph, self._routes_cell = graph, None
         self.latest: dict[str, tuple[dict, float]] = {}      # node -> (last wx message, rx time)
         self.fires: list[FirePoint] = []
-        self.crew_xy = tuple(routes[0].xy[0])                # default: start of the first route
+        self.start_xy = self.crew_xy = tuple(routes[0].xy[0])   # default: start of the first route
         self.active: str | None = None
         self.events: deque[tuple[float, str]] = deque()
         self.history = {r.id: deque() for r in routes}       # route -> (ts, margin)
@@ -106,14 +111,16 @@ class MarginEngine:
         self.add_fire(x, y, now, data.get("src") or data.get("source") or "fire message")
 
     def on_crew(self, data: dict, now: float) -> None:
-        self.crew_xy = to_utm(float(data["lon"]), float(data["lat"]))
+        xy = to_utm(float(data["lon"]), float(data["lat"]))
+        self.terrain.value("dem", *xy)                       # raises if outside the terrain patch
+        self.crew_xy = xy
 
     def on_cmd(self, data: dict, now: float) -> None:
         cmd = data.get("cmd")
         if cmd == "reset":
             self.fires.clear()
             self.active = None
-            self.crew_xy = tuple(self.routes[0].xy[0])
+            self.crew_xy = self.start_xy
             for h in self.history.values():
                 h.clear()
             self.drop_until.clear()
@@ -200,6 +207,10 @@ class MarginEngine:
                 self.event(now, f"Node {nid} stale (no data for {config.STALE_S} s): using worst-case values")
             self.prev_node_status[nid] = status
 
+        if self.graph is not None:
+            c = build_graph.cell(self.graph, *self.crew_xy)
+            if c != self._routes_cell:                       # re-plan only when the crew changes cell
+                self.routes, self._routes_cell = graph_routes(self.graph, self.crew_xy), c
         wx, wx_notes = self.weather(health)
         spreads = spreads_for(self.fires, wx, self.terrain)
         results = evaluate(self.routes, spreads, self.crew_xy, now)
@@ -261,7 +272,8 @@ class MarginEngine:
                          "t_fire_min": r1(r.t_fire_min), "t_crew_min": r1(r.t_crew_min)}
             routes.append({"id": r.route.id, "name": r.route.name, "to": r.route.to,
                            "margin_min": r1(r.margin_min), "status": status[r.route.id],
-                           "active": r.route.id == self.active, "eta_min": r1(r.eta_min), "worst": worst})
+                           "active": r.route.id == self.active, "eta_min": r1(r.eta_min), "worst": worst,
+                           "path": r.route.path_lonlat()})
         nodes = []
         for nid, (s, age) in health.items():
             n = self.nodes.get(nid, {})
@@ -309,8 +321,15 @@ def main() -> None:
     config.SCENARIO = args.scenario
 
     nodes_file, routes_file, placeholder = input_files()
-    terrain = Terrain()
-    engine = MarginEngine(terrain, load_routes(routes_file, terrain), load_nodes(nodes_file), placeholder)
+    if config.GRAPH_FILE.exists():
+        graph = load_graph()
+        terrain, routes_file = GraphTerrain(graph), config.GRAPH_FILE
+        placeholder = not config.NODES_FILE.exists()
+        engine = MarginEngine(terrain, graph_routes(graph, crew_start_xy()), load_nodes(nodes_file),
+                              placeholder, graph)
+    else:  # v1, testing only
+        terrain = Terrain()
+        engine = MarginEngine(terrain, load_routes(routes_file, terrain), load_nodes(nodes_file), placeholder)
     print(f"[engine] model={MODEL_NAME} scenario={config.SCENARIO} nodes={nodes_file} routes={routes_file}"
           f"{'  ** PLACEHOLDER DATA **' if placeholder else ''}", flush=True)
     for r in engine.routes:
