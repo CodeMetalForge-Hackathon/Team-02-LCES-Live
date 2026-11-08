@@ -57,6 +57,18 @@ const point = (lon: number, lat: number, properties: Record<string, unknown> = {
   ({ type: "Feature", properties, geometry: { type: "Point", coordinates: [lon, lat] } });
 
 type EngineRoute = NonNullable<EngineState["routes"]>[number];
+const ROUTE_COLOR: Record<string, string> = { green: "#50bb9d", amber: "#d9a95a", red: "#cf6a60" };
+// ticket 11: the active route drawn from the crew to the safety zone after Start / a reroute
+const DRAW_DELAY_MS = 400, DRAW_MS = 1500, PLANNING_MS = 1500, RESULT_MS = 5000;
+const drawGradient = (color: string, p: number) => ["step", ["line-progress"], color, Math.min(1, Math.max(1e-4, p)), "rgba(0,0,0,0)"];
+// base routes layer: hide the active route while it is being drawn; the cut route moves to the dashed layer
+function setRouteFilters(map: Map, drawing: boolean, cutId: string | null) {
+  const parts: any[] = [];
+  if (drawing) parts.push(["!", ["get", "active"]]);
+  if (cutId) parts.push(["!=", ["get", "id"], cutId]);
+  map.setFilter("routes", parts.length ? ["all", ...parts] as any : null);
+  map.setFilter("routes-cut", ["==", ["get", "id"], cutId ?? ""]);
+}
 const GREEN_MIN = 5, RED_MIN = 2;   // config.py margin thresholds
 const marginClass = (m: number) => m >= GREEN_MIN ? "good" : m >= RED_MIN ? "warn" : "danger";
 // index of the path point where fire - crew is smallest (the route's margin), or null if no fire reaches it
@@ -116,6 +128,14 @@ function addLayers(map: Map) {
   map.addLayer({ id: "routes", type: "line", source: "routes", layout: { "line-cap": "round", "line-join": "round" }, paint: {
     "line-color": ["match", ["get", "status"], "green", "#50bb9d", "amber", "#d9a95a", "red", "#cf6a60", "#8c9691"],
     "line-width": ["case", ["get", "active"], 7, 4], "line-opacity": ["case", ["get", "active"], 1, .75] } });
+  // the route the crew left at a reroute: dashed (ticket 11)
+  map.addLayer({ id: "routes-cut", type: "line", source: "routes", filter: ["==", ["get", "id"], ""], layout: { "line-cap": "butt" }, paint: {
+    "line-color": ["match", ["get", "status"], "green", "#50bb9d", "amber", "#d9a95a", "red", "#cf6a60", "#8c9691"],
+    "line-width": 4, "line-opacity": .85, "line-dasharray": [2, 1.5] } });
+  // active route being drawn after Start / a reroute; lineMetrics for line-progress
+  map.addSource("route-draw", { type: "geojson", data: empty, lineMetrics: true });
+  map.addLayer({ id: "route-draw", type: "line", source: "route-draw", layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-width": 7, "line-gradient": drawGradient("#50bb9d", 0) as any } });
   // invisible wide line: easier hover / tap target for the route tooltip
   map.addLayer({ id: "routes-hit", type: "line", source: "routes", paint: { "line-width": 16, "line-opacity": 0 } });
   map.addSource("tightest", { type: "geojson", data: empty });
@@ -184,6 +204,7 @@ function Legend() {
     [line("#50bb9d"), "Safe (margin ≥ 5 min)"],
     [line("#d9a95a"), "Tight (2–5 min)"],
     [line("#cf6a60"), "Cut: fire arrives first"],
+    [line("#cf6a60", "6 4"), "Route left at a reroute"],
     [<svg width="30" height="12"><circle cx="15" cy="6" r="5" fill="none" stroke="#cf6a60" strokeWidth="2" /></svg>, "Tightest point"],
     [line("#e8eef0", "1 4", 2), "2013 crew route"],
     [line("#c76a5e", "6 4", 2), "2013 fire perimeter"],
@@ -220,6 +241,12 @@ export default function App() {
   const nodeHover = useRef<{ popup: maplibregl.Popup; id: string } | null>(null);
   const sensorsRef = useRef<Record<string, SensorReading>>({});
   const [bearing, setBearing] = useState(0);
+  // re-plan animation (ticket 11): set when engine/state.replan_ts changes while the page is open
+  const [replan, setReplan] = useState<{ key: number; kind: "start" | "reroute"; stage: "planning" | "done" } | null>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [cutId, setCutId] = useState<string | null>(null);
+  const lastReplan = useRef<number | null | undefined>(undefined);   // undefined = no engine/state seen yet
+  const lastPhase = useRef<string | undefined>(undefined), lastActive = useRef<string | null>(null);
 
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now() / 1000), 1000); return () => clearInterval(timer); }, []);
 
@@ -312,6 +339,49 @@ export default function App() {
     h.popup.setLngLat(r.path[i]).setHTML(routePointHtml(engine, r, i));
   }, [engine]);
 
+  // detect a new plan: Start (previous phase ready) or a reroute; the first state after a reload only records it
+  useEffect(() => {
+    if (engineAt == null) return;
+    const r = engine.replan_ts ?? null, prev = lastReplan.current, wasReady = lastPhase.current === "ready", prevActive = lastActive.current;
+    lastReplan.current = r; lastPhase.current = engine.phase; lastActive.current = engine.routes?.find(x => x.active)?.id ?? null;
+    if (r == null) { setReplan(null); setCutId(null); return; }
+    if (prev === undefined || r === prev) return;
+    const kind = wasReady || prev == null ? "start" : "reroute";
+    setCutId(kind === "reroute" ? prevActive : null);
+    setReplan({ key: r, kind, stage: "planning" });
+  }, [engine, engineAt]);
+
+  useEffect(() => { if (mapReady && map.current) setRouteFilters(map.current, drawing, cutId); }, [drawing, cutId, mapReady]);
+
+  // banner timing, pulse from the crew, and the active route drawn progressively
+  useEffect(() => {
+    const m = map.current;
+    if (!replan || !mapReady || !m) return;
+    const timers = [window.setTimeout(() => setReplan(x => x && { ...x, stage: "done" }), PLANNING_MS),
+                    window.setTimeout(() => setReplan(null), PLANNING_MS + RESULT_MS)];
+    let pulse: maplibregl.Marker | undefined;
+    const crew = engineRef.current.crew;
+    if (crew) {
+      const el = document.createElement("div"); el.className = "pulse-marker"; el.innerHTML = "<i></i><i></i>";
+      pulse = new maplibregl.Marker({ element: el, anchor: "center" }).setLngLat([crew.lon, crew.lat]).addTo(m);
+      timers.push(window.setTimeout(() => pulse?.remove(), 2200));
+    }
+    const src = m.getSource("route-draw") as GeoJSONSource;
+    let raf = 0, t0 = performance.now(), shown: EngineRoute | undefined;
+    setDrawing(true);
+    const frame = (t: number) => {
+      const r = engineRef.current.routes?.find(x => x.active && x.path?.length);
+      if (!r) { t0 = t; raf = requestAnimationFrame(frame); return; }   // active route not chosen yet: wait for it
+      if (r !== shown) { src.setData(fc([{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: r.path! } }])); shown = r; }
+      const p = (t - t0 - DRAW_DELAY_MS) / DRAW_MS;
+      m.setPaintProperty("route-draw", "line-gradient", drawGradient(ROUTE_COLOR[r.status] ?? "#8c9691", p) as any);
+      if (p < 1) raf = requestAnimationFrame(frame);
+      else { setDrawing(false); src.setData(empty); }
+    };
+    raf = requestAnimationFrame(frame);
+    return () => { timers.forEach(clearTimeout); cancelAnimationFrame(raf); pulse?.remove(); src.setData(empty); setDrawing(false); };
+  }, [replan?.key, mapReady]);
+
   useEffect(() => { if (!resetArmed) return; const t = window.setTimeout(() => setResetArmed(false), 3000); return () => clearTimeout(t); }, [resetArmed]);
 
   const sendCmd = async (body: Record<string, unknown>) => {
@@ -363,6 +433,11 @@ export default function App() {
       </div>
     </div>
     {cmdError && <div className="cmd-error">{cmdError}</div>}
+    {replan && <div className={`replan-banner ${replan.stage}`} role="status">
+      {replan.stage === "planning"
+        ? <><span className="replan-spinner" />{replan.kind === "start" ? "Planning escape route…" : "Re-planning escape route…"}</>
+        : <>{replan.kind === "start" ? "Escape route: " : "Rerouted: "}<b>{active?.name ?? active?.id ?? "—"}</b></>}
+    </div>}
 
     <aside className="rail">
       <section className={`status-banner ${active?.status ?? "none"}`}>

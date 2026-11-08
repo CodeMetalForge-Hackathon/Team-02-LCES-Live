@@ -86,7 +86,7 @@ local markdown tickets. Still no GitHub Issues.)
 | 06 | Label Boulder Springs Ranch + 100 m circle, "2013 deployment site"; remove `sites.geojson` layer | dashboard | **done** |
 | 07 | `render_map_layers.py` → `terrain.png`, `fuel.png`, `map_osm.geojson` | data | next |
 | 08 | Coloured backdrop, fuel toggle, roads/buildings | dashboard | |
-| 11 | Re-plan animation (banner, pulse from crew, route drawn via `line-gradient`/`line-progress`); now mainly at Start | dashboard | |
+| 11 | Re-plan animation (banner, pulse from crew, route drawn via `line-gradient`/`line-progress`); now mainly at Start | dashboard | **done** (08:45) |
 | 12 | Optional aerial imagery | data | needs-triage |
 | 13 | Wind smoothing: moving average (20 s, direction as a vector), rounded 5° / 0.5 m/s up | engine | **done** |
 | 14 | Simulated crew walks the **active route** after Start (decided over the 2013 descent line) | engine | **done** |
