@@ -28,11 +28,11 @@ Core question the system answers, continuously:
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
-| Margin engine | Not started | Vivek | After ingest: staleness, trail graph, fire/escape model |
-| Flame sensor | Not started | TBD | — |
-| LoRa link | Not started | TBD | Module model unknown; RadioLib likely |
-| Thermal lookout | Not started | TBD | Get the thermal camera from the shared library first |
-| Node placement (fake GPS per node, §1.4) | Not started | TBD | Pick a Yarnell lat/lon per node once the ranch and crew route are pulled from the investigation report (§3.2) |
+| Margin engine | Not started; **design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek | Fire spread on the grid, scipy routing, `engine/state` (§5.5) |
+| Flame sensor, LoRa link, thermal lookout, crew tag | **Cut (Nov 8)** | — | — |
+| Node placement (fake GPS per node, §1.4) | **Decided Nov 8:** N1 on the ridge near the saddle, N2 in the box canyon, N3 between canyon and ranch | TBD | Pick exact lat/lon on the map |
+
+**Vocabulary:** `docs/GLOSSARY.md` is the source for terms (sensor node, cell, escape route, margin, the black, …). Decisions with a real trade-off are in `docs/adr/`.
 
 ---
 
@@ -40,11 +40,11 @@ Core question the system answers, continuously:
 
 ### 1.1 Overview
 ```
-ESP32 nodes (temp, RH, flame) ─────────────MQTT─┐
+ESP32 nodes (temp, RH) ────────────────────MQTT─┐
 La Crosse wind sensor ─433 MHz─ SDR + rtl_433 ──┤  sensors/<node>/wx
    (wind_bridge.py)                             │
-Thermal lookout (hot spot → node id) ───────────┤  sensors/<src>/fire
-Crew tag (optional) ────────────────────────────┤  crew/<id>/pos
+Dashboard "ignite" button ──────────────────────┤  sensors/<src>/fire
+Scenario simulator (crew walk) ─────────────────┤  crew/<id>/pos
                                                 ▼
                                Mosquitto on the Pi (10.42.1.1)
                                                 │
@@ -52,8 +52,8 @@ Crew tag (optional) ────────────────────
                                                 │
      ┌──────────────────────────────────────────┼──────────────────────────┐
      ▼                                          ▼                          ▼
-FIRE MODEL (pyrothermel)            CREW MODEL (pgRouting)        STATIC DATA (loaded once)
-fire arrival time per node          crew arrival time per node    DEM, slope, aspect, fuel,
+FIRE MODEL (pyrothermel + scipy)    CREW MODEL (scipy)            STATIC DATA (loaded once)
+fire arrival time per cell          crew arrival time per cell    DEM, slope, aspect, fuel,
                                                                   trails, grid, safety zones
      └────────────────────► MARGIN ENGINE ◄─────┘
                  margin, colour, reroute, alerts
@@ -62,15 +62,15 @@ fire arrival time per node          crew arrival time per node    DEM, slope, as
          ws_server.py (FastAPI, subscribes sensors/# + engine/#) → WebSocket → MapLibre
 ```
 Every component talks only through Mosquitto, so the simulator and the real nodes are interchangeable. The WebSocket server only subscribes to MQTT.
-Recompute on every new reading or detection (target: < 2 s end to end).
+Recompute on every incoming message **and at least every 5 s** (the fire moves with the clock and the crew walks; target: < 2 s end to end).
 
 ### 1.2 MQTT topics and message format
 | Topic | Sent by | Content |
 |---|---|---|
 | `sensors/<node>/wx` | Sensor nodes, wind bridge, simulator | Weather heartbeat (every 10 s for ESP32 nodes; N1 per radio packet, §1.3) |
-| `sensors/<src>/fire` | Thermal lookout | Spot-fire event, placed at the detecting node's position (or explicit lat/lon) |
-| `crew/<id>/pos` | Crew tag (optional) | Crew position |
-| `engine/state` | Margin engine | Route margins and colours (format TBD) |
+| `sensors/<src>/fire` | Dashboard "ignite" button (manual fire point) | Fire point at a sensor node's position or an explicit lat/lon. Hot-sensor fire points are created inside the engine (§1.4) |
+| `crew/<id>/pos` | Scenario simulator | Crew position (single crew `C1`) |
+| `engine/state` | Margin engine | Escape routes, margins, fire polygons, alerts (§5.5) |
 
 JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds its own receive time.
 ```json
@@ -148,13 +148,14 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 
 ### 1.4 Coordinates
 **Decision (Nov 7): no tabletop model, no scale.** Each node gets a **fake GPS position** at a real Yarnell spot. All positions are real coordinates; the room's layout doesn't matter except for spacing (below).
-- **Nodes:** a config file maps node id → lat/lon (e.g. ridge, saddle, near the ranch). The engine/ingest fills `nodes.geom` from it. Positions get picked once the ranch and crew route are pulled from the investigation report (§3.2).
-- **Spot fire:** when a node's flame sensor, or the thermal camera aimed at a node, detects heat, the fire point is placed **at that node's position** (`"node":"N2"`), or at an explicit `lat/lon` (e.g. a preset ignition point).
-- **Crew:** fixed fake lat/lon (on the ridge), or moved along the route by the simulator or a button.
-- **Wind:** the fan blows on the real sensor; the reading counts as the wind at N1's position. **North still matters:** mark north on the floor, or set `DIR_OFFSET` once (§1.3).
+- **Sensor nodes:** `data/yarnell/nodes.json` maps node id → lat/lon + label; the engine/ingest fills `nodes.geom` from it. **Decided Nov 8:** **N1** (wind) on the ridge near the saddle, where a crew would put it (high, exposed); **N2** in the box canyon on the 2013 descent line; **N3** between the canyon and the ranch. Exact lat/lon picked on the map.
+- **Fire points:** (1) **hot sensor node rule**, in the engine: a fresh reading ≥ 45 °C, or a rise of more than 8 °C within 30 s, creates a fire point at that node's position (hair dryer; DHT11 tops out near 50 °C, so tune on the day); (2) **manual** "ignite" button on the dashboard (stage backup). At most one fire point per sensor node; a node that stays hot keeps its first ignition time. Fire points last until a manual reset.
+- **Crew:** single crew `C1`. The scenario simulator starts it at the **saddle at 16:20** (2013 clock) and walks it down the **2013 descent line** at its computed travel speed, in real time. It keeps walking that line even when the system reroutes: the demo contrasts what happened with what the system advises.
+- **Wind:** the fan blows on the real sensor; **N1's wind applies to the whole area** (one sensor can't tell where the wind changes, so using it everywhere is the safer assumption). The fire model multiplies N1's speed by `WIND_SCALE` (default ×4: a fan gives 3–5 m/s, the 2013 outflow was 13–19 m/s). Engine-only; not shown on the dashboard. **North still matters:** mark north on the floor, or set `DIR_OFFSET` once (§1.3).
+- **Demo runs in real time** (no time compression); wind shifts and new fire points change arrival times instantly.
 - **Floor space:** only for spacing nodes far enough apart (a couple of metres) that the fan or heat gun hits one node and not the others, so each reads differently.
 - **Messages carry lat/lon (EPSG:4326);** the engine converts to **EPSG:32612 (UTM 12N, metres)** with one `pyproj` transform in one place, because the fire and crew models need metres (spread rate and Tobler speed in km/h, rasters in metres). Reproject every raster input to EPSG:32612 on load.
-- **Routing crop:** the graph covers a 2 km × 2 km square inside the 5 km data patch (§3.1, §4.1), containing the ridge, the deployment site and the ranch. Yarnell town (~2.8 km east of the deployment site) stays outside. Exact bounds follow from the ranch location.
+- **Routing crop:** the graph covers a 2 km × 2 km square inside the 5 km data patch (§3.1, §4.1), **centred at ≈ 34.221 N, −112.777 W** (between the ridge deck and the ranch): ridge, saddle, box canyon, deployment site, ranch and the edge of the black. Yarnell town (~2.8 km east of the deployment site) stays outside. Check the black polygon fits once drawn.
 - **Fallback** if the DEM/LANDFIRE load is not ready: single fuel (SH5) and flat ground in real metres. Only the terrain detail is lost.
 - Dropped with the tabletop: table size, `SCALE`, origin `E0/N0`, foam terrain.
 
@@ -172,8 +173,8 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 | Input | Value / source | Notes |
 |---|---|---|
 | `fuel_model` | `FuelModel.from_existing(<int>)` with the LANDFIRE **FBFM40** cell value | The integer IDs equal LANDFIRE codes (101 = GR1, 145 = SH5). 91–99 = non-burnable → spread 0, so they act as natural barriers. Demo default: `SH5` (chaparral, Yarnell) |
-| `moisture_scenario` | Demo: `MoistureScenario.from_existing(1, 2)`. Live: `MoistureScenario(one_hr, ten_hr, hundred_hr, live_herb, live_woody)` as fractions | **TODO:** 1-h moisture from node temp + RH using the Rothermel 1983 (INT-GTR-143) table, about 10 lines. 10-h ≈ 1-h + 1%, 100-h ≈ 1-h + 2% |
-| `wind_speed` | `wind_ms` from the nodes, **km/h** (`× 3.6`) | Use the **highest recent `wind_ms`** (conservative). N1 (La Crosse) reports averages only, no gust |
+| `moisture_scenario` | Demo: `MoistureScenario.from_existing(1, 2)`. Live: `MoistureScenario(one_hr, ten_hr, hundred_hr, live_herb, live_woody)` as fractions | **TODO:** 1-h moisture from temp + RH using the Rothermel 1983 (INT-GTR-143) table, about 10 lines. 10-h ≈ 1-h + 1%, 100-h ≈ 1-h + 2%. **Input (decided Nov 8):** hottest temp and lowest RH across fresh sensor nodes, one value for the whole area; a node with a fire point is excluded (the hair dryer must not dry out the whole map) |
+| `wind_speed` | N1's `wind_ms` × `WIND_SCALE` (§1.4), **km/h** (`× 3.6`) | Use the **highest recent `wind_ms`** (conservative). N1 (La Crosse) reports averages only, no gust |
 | `wind_input_mode` | `'direct_midflame'` for nodes mounted ~1–2 m | Use `'ten_meter'` (+ canopy_cover/height/ratio) for **forecast** winds. 20 km/h at 10 m becomes ~9.5 km/h midflame, which more than halves the spread rate |
 | `wind_direction` | **`wind_dir`, direction the wind blows FROM** | Verified in pyrothermel: 225 in → head runs toward 45. **No +180 needed.** N1's convention still needs the fan test (§1.3) |
 | `slope` | Degrees, from the slope raster **at the fire point** | Conservative option: steepest upslope sampled along the fire→target line |
@@ -189,18 +190,15 @@ Outputs (metric): `spread_rate` (km/h), `direction` (compass bearing of the head
 - **We don't write our own ellipse.** `direction_of_interest` handles the ellipse internally, including a sensible length-to-breadth ratio (~3.7:1 at 20 km/h). The hand Anderson formula would give ~22:1 there unless capped at 8 like FARSITE does.
 - Ignore `scorch_height` (meaningless at extreme intensity).
 
-### 2.4 Fire arrival time at a point
-```python
-def arrival_min(run, fire_xy, pt_xy):           # metres (after §1.4 transform), x=east, y=north
-    dx, dy = pt_xy[0]-fire_xy[0], pt_xy[1]-fire_xy[1]
-    bearing = math.degrees(math.atan2(dx, dy)) % 360
-    ros_m_min = run.run_surface_fire_in_direction_of_interest(bearing)["spread_rate"] * 1000/60
-    return math.hypot(dx, dy) / ros_m_min
-```
-- With several fire points (spot fires, thermal blobs), the arrival time = **min over all fire points**.
-- Divide arrival times by a **safety factor (default 1.5)**. Show the unfactored value as the uncertainty band.
-- Model assumptions to state openly: straight-line spread, constant conditions between recomputes, no spotting, no terrain wind channeling.
-- Upgrade path: Finney (2002) Minimum Travel Time, i.e. fire arrival as a shortest path over the same grid with edge time = length / directional ROS. Reuses pgRouting.
+### 2.4 Fire arrival time per cell (minimum travel time, decided Nov 8, ADR 0002)
+The fire **keeps its history**, so a wind shift turns the fire from where it already reached (the point of the demo). Finney (2002) minimum travel time on the same 10 m grid as the crew routing:
+- **State:** one fire arrival time per cell, stored as a **clock time** (`inf` = not reached).
+- **Start:** cells inside **the black** polygon (~16:00 burned area, hand-drawn from the SAIT maps) are reached at scenario start; its edge is the first fire front. New fire points set their cell to their ignition time. No separate main-fire points.
+- **Each recompute:** cells with arrival ≤ now are fixed. Run scipy Dijkstra (multi-source) from the fire front over the unreached cells; step time = step length / rate of spread in that step's direction under **current** wind and moisture. Those times become the new arrival times.
+- **Rate of spread:** pyrothermel `run_surface_fire_in_direction_of_interest`, **cached by (fuel, slope band, aspect band, step direction)** per recompute: a few hundred calls instead of 40k × 8.
+- **Cell states:** reached > `BURNOUT_MIN` (5 min) ago = **the black** (safe); reached within the last 5 min = **burning** (impassable); not reached = unburned.
+- Divide the time **until** arrival (arrival − now) by the **safety factor (1.5)** before comparing with crew times. Show the unfactored value as the uncertainty band.
+- Model assumptions to state openly: constant conditions between recomputes, no spotting, no terrain wind channeling, one wind for the whole area.
 
 ### 2.5 Extra outputs used for alerts
 | Use | Rule | Source |
@@ -263,9 +261,14 @@ Rebuild (needs internet, no GDAL install needed; rasterio bundles it): `uv run -
 The ordered plan is in §9 (Map + routing track); this list keeps the data-specific details.
 - [ ] Put EVC/EVH/EVT on the 10 m grid (nearest neighbour from the LFPS download) and turn shrub height × cover into the off-trail travel factor (replaces the placeholder per-fuel factors in §4.3).
 - [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LFPS rasters (`gdalwarp -r bilinear` / `-r near`); keep the ImageServers as a cross-check.
-- [ ] From the Yarnell Hill investigation report: Boulder Springs Ranch (the 2013 safety zone; **not in OSM, don't guess**), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed).
+- [x] From the SAIT report (Nov 8; printed page numbers, PDF page = printed + 6):
+  - **Deployment site:** 34.22047, −112.77757 (p.82). **Ranch:** ~600 yd east of it (p.2, p.31) ≈ 34.2205, −112.7716; size not stated.
+  - **Crew:** in the black near the "lunch spot", on the ridge flank (p.21, p.30). Walked SE on the two-track road to the saddle ~16:05–16:20, then down a box canyon: boulders, washes, "pockets of heavy brush", travel under half the road rate (p.30, p.37–38).
+  - **Vegetation:** chaparral 3–10 ft, "nearly impenetrable", unburned since 1966 (p.8, p.65).
+  - **Wind:** W 10–12 mph ~15:50 (p.25); outflow reached the fire's north end 16:18 (p.29), the south end 16:30: WNW → NNE, 30–40 mph, gusts 43, "50 mph+" in the box canyon (p.64, p.74). Deployment ~16:41; spread 10–12 mph, 60–80 ft flames, under 2 min warning (p.78).
+  - **The black:** > 400 acres next to the crew (p.17, p.35). Vehicles moved to the Shrine area ~15:55 (p.24).
+- [ ] Hand-draw **the black at ~16:00** (polygon) and the **2013 descent line** (reference layer) from the report maps → `data/yarnell/scenario.geojson`.
 - [ ] Choose the 2 km × 2 km routing crop and each node's fake GPS position (§1.4).
-- [ ] Hand-drawn escape routes as lon/lat GeoJSON (`data/yarnell/routes.geojson`).
 - [ ] Load rasters (`raster2pgsql`, ships with PostGIS on the Pi) and GeoJSON (`ogr2ogr`, or psycopg + `ST_GeomFromGeoJSON`) into PostGIS.
 - [ ] SH5 override inside the perimeter for the 2013 replay (one flag in `config.py`).
 - [ ] Optional: offline street basemap (PMTiles); 1 m lidar hillshade.
@@ -299,11 +302,11 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
 ## 4. Crew model (routing)
 
 ### 4.1 Graph: two layers joined together
-1. **Trail graph.** Demo: **hand-drawn** on the Yarnell map (2–3 routes + alternates, snapped at junctions), e.g. in QGIS or geojson.io, saved as lon/lat GeoJSON. Later: OSM via `osm2pgrouting`, or USFS trails + `pgr_extractVertices`. Check OSM coverage at Yarnell before relying on it.
-2. **Off-trail grid graph.** Every 10 m DEM cell is a node with 8 neighbours (16 with knight moves, for smoother paths). Join trail vertices to the nearest grid cells.
+1. **Trail graph.** OSM roads/tracks/trails from `osm.geojson` (decided Nov 8; no hand-drawn routes, see §4.6).
+2. **Off-trail grid graph.** Every 10 m cell is a graph vertex with 8 neighbours (16 with knight moves, for smoother paths). Join trail vertices to the nearest grid cells.
 
-**How the grid is built** (`build_graph.py`, Python + numpy, written to PostGIS with `COPY`; runs once):
-- **Area:** only the 2 km × 2 km routing crop (§1.4), not the full 5 km patch: 200 × 200 = **40,000 nodes**. The full patch would be 250k nodes / ~1M edges, and pgRouting reloads every edge on every query, too slow for the < 2 s target.
+**How the grid is built** (`build_graph.py`, Python + numpy, written to `data/yarnell/graph.npz`, optionally also to PostGIS for SQL queries; runs once):
+- **Area:** only the 2 km × 2 km routing crop (§1.4), not the full 5 km patch: 200 × 200 = **40,000 nodes**. The full patch would be 250k nodes / ~1M edges, too much for the < 2 s target with 3–4 Dijkstra runs per recompute.
 - **Nodes (`grid_nodes`):** one per cell centre. `id = row * 200 + col`, `geom` = cell centre, `elev` from the DEM, `veg_factor` from §4.3.
 - **Edges (`grid_edges`):** store only 4 of the 8 directions per node (E, SE, S, SW); the other 4 are the same edges seen from the neighbour. Each row has `cost` (source → target) and `reverse_cost` (target → source). ≈ 160k rows.
   ```
@@ -312,8 +315,8 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
      SW  S  SE
   ```
 - **Impassable** (cost `-1`): slope > 38°, water/buildings (OSM polygons stamped onto the grid), diagonal corner-cutting past an impassable cell. Vegetation is **never** impassable (§4.3).
-- **Trails:** OSM roads/tracks/trails + the hand-drawn routes, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing runs over `grid_edges UNION ALL trails UNION ALL connectors`.
-- Crew position and safety zones are **snapped** to their nearest node: `SELECT id FROM grid_nodes ORDER BY geom <-> pt LIMIT 1`.
+- **Trails:** OSM roads/tracks/trails, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing (crew times, escape routes, reroutes) always runs over **grid + trails + connectors** together (concatenated edge arrays in `graph.npz`), so an escape route can go cross-country wherever that is faster.
+- Crew position and safety zones are **snapped** to their cell by grid arithmetic (§4.6).
 
 Why both: crews mostly use trails, but Yarnell's crew went cross-country, so a trail-only graph can't represent that.
 
@@ -328,7 +331,7 @@ reverse    = same with −S                              (uphill ≠ downhill)
 - **Segmentize trails to ~25 m first** (`ST_Segmentize` + dump into individual segments). Otherwise a climb-then-descend segment shows dz ≈ 0.
 - Grid edge length: 10 m straight, 14.14 m diagonal.
 - **No corner-cutting:** skip a diagonal edge if either orthogonal neighbour is impassable.
-- Impassable: no edge (or cost `-1` in pgRouting).
+- Impassable: no edge.
 
 Trail cost SQL (corrected):
 ```sql
@@ -387,83 +390,81 @@ So a 400 m shortcut through old chaparral costs about as much time as 4 km of tr
 - 8-direction grids zigzag (~8% too long). Use 16 neighbours, or simplify the path afterwards and re-check it against barriers.
 - **Scouting status:** the crew boss can mark segments **scouted** or **no-go** on the map. Unscouted off-trail stretches get an extra time buffer and a warning ("route uses 400 m of unscouted brush"). This addresses the Yarnell Hill lesson directly.
 
-### 4.5 Start and targets
-- Start: crew position (`crew/<id>/pos`, or fixed) snapped to the nearest node (`pgr_withPoints` to start partway along an edge).
-- Targets: all safety zones + vehicle locations. `pgr_dijkstra(sql, crew_node, ARRAY[...])`, cheapest result wins.
+### 4.5 Start and targets (decided Nov 8)
+- Start: latest `crew/C1/pos`, snapped to its cell.
+- **Safety zones:** **Boulder Springs Ranch**, a circle of `RANCH_RADIUS_M` = 100 m around ≈ 34.2205 N, −112.7716 W (SAIT: deployment "approximately 600 yards west of the Ranch", p.2/p.31; size not stated, adjust by eye on the hillshade/OSM buildings), and **the black** (any black cell, §2.4; it grows as the fire burns). Vehicles dropped: they were moved to the Shrine area at ~15:55 (p.24).
+- One Dijkstra from the crew gives times to every cell; each safety zone's escape route = the fastest path to any of its cells (`predecessors` gives the path).
 
-### 4.6 Tool decision
-**pgRouting** (handles uphill vs downhill costs, same database as everything else). Considered and rejected for now: `skimage.graph.MCP_Geometric` (can't make uphill cost more than downhill), GRASS `r.walk` (good but a heavy extra tool).
-
-**Simpler option to consider:** `build_graph.py` already holds the whole graph in numpy, and `scipy.sparse.csgraph.dijkstra` handles directed costs (uphill ≠ downhill, unlike skimage). It runs in milliseconds in memory, and blocking fire = set those edge costs to infinity on a copy. PostGIS would still hold the rasters and vectors for the map and SQL queries. For a 40k-node demo this is likely faster and simpler than pgRouting (pgRouting on the Pi not yet timed). **Team to decide.**
+### 4.6 Tool decision: scipy (decided Nov 8, ADR 0001)
+**`scipy.sparse.csgraph.dijkstra` on an in-memory graph**, built once by `build_graph.py`. It handles directed costs (uphill ≠ downhill), runs in milliseconds, and the fire model (§2.4) uses the same grid. Closures = drop those edges from the edge list and rebuild the sparse matrix. PostGIS still holds the rasters and vectors for the map and SQL queries. `pgRouting` was rejected: it reloads every edge per query and needs 3–4 queries per recompute (untimed on the Pi). Also rejected: `skimage.graph.MCP_Geometric` (can't make uphill cost more than downhill), GRASS `r.walk` (heavy extra tool).
+- **Graph file** `data/yarnell/graph.npz`: cell UTM x/y, edge arrays `src`, `dst`, `cost_s` (each direction its own entry), safety-zone cell ids.
+- **Snapping** a lat/lon to a cell is arithmetic on the regular grid: `col = (x - x0) // 10`.
+- **Trails** (the full-speed layer) = OSM roads/tracks only; everything else is routed over the off-trail grid at Tobler × vegetation factor. The 2013 crew route is a **map reference layer**, not a trail: they went cross-country through brush, so a full-speed trail there would invert the lesson.
+- Gotcha: zero-cost edges vanish in a scipy sparse matrix (harmless; every step costs time).
 
 ---
 
-## 5. Margin engine
+## 5. Margin engine (design settled Nov 8)
 
-Every recompute:
-1. Pull the latest reading per node and the active fire points. **A stale node (§5.1) is not skipped: the engine uses worst-case values for it** (§5.3).
-2. Build one pyrothermel run per fire point (fuel/slope/aspect at that point, current wind and moisture).
-3. Run Dijkstra from the crew to **every** node, with no fire blocking (`pgr_drivingDistance` or one-to-all). That gives `t_crew(i)` for every node `i`.
-4. For every route node: `t_fire(i) = min over fire points of arrival_min(...) / safety_factor`.
-5. `margin(route) = min_i ( t_fire(i) − t_crew(i) )`. The safety zone itself is one of the nodes.
-6. **Reroute:** mark edges where `t_fire < t_crew` (plus the flame-distance buffer) as impassable, then run Dijkstra again. The surviving cheapest path becomes the active escape route. Mechanics in §5.4.
-7. **Leave-by time** (dynamic trigger) = `now + margin − buffer`. Show it as a countdown.
-8. Publish the result (routes with margin/colour, fire points, node health) to MQTT `engine/state`; `ws_server.py` forwards it to the dashboard.
+Every recompute (on each incoming message, and at least every 5 s):
+1. Pull the latest reading per sensor node, the active fire points and the crew position. **A stale sensor node is not skipped: the engine uses worst-case values for it** (§5.3). Apply the hot-sensor-node rule (§1.4) to create fire points.
+2. **Fire:** advance the fire arrival times from the current fire front under current wind and moisture (§2.4). Classify cells: the black / burning / unburned.
+3. **Crew:** one Dijkstra from the crew to every cell, no closures: `t_crew(cell)`.
+4. `t_fire(cell) = (arrival − now) / safety_factor`.
+5. **Close** a cell if `t_fire < t_crew`, **or** it is burning, **or** it lies within 4 × flame length of a burning cell (60–80 ft flames ≈ 75–100 m). Drop the edges touching closed cells and run Dijkstra again.
+6. **Escape routes:** one per safety zone (ranch; any black cell). Margin of a route = `min over its cells (t_fire − t_crew)`; black cells count as unlimited. The safety zone's own cells are included.
+7. A detour reaches later cells later, so repeat 5–6 once or twice until the routes stop changing. **No path left → "no safe route" alert.**
+8. **Active route** = the escape route with the best margin. **Reroute** = the active route's path changes, or another safety zone's route becomes active.
+9. **Leave-by time** = `now + margin − buffer`, shown as a countdown.
+10. Publish `engine/state` (§5.5); `ws_server.py` forwards it to the dashboard.
+
+**Demo story:** scenario starts 16:20, crew at the saddle, the black behind them. Fan on (the outflow) → fire turns south toward the box canyon → the ranch route goes red → reroute: back to the black. The simulated crew keeps walking the 2013 line (§1.4), so the margin keeps falling on the path the real crew took.
 
 ### 5.1 Thresholds (defaults, in `config.py`)
 | Status | Rule |
 |---|---|
 | Green | margin ≥ 5 min |
 | Amber | 2 min ≤ margin < 5 min, **or** margin dropped > 30% since the last update |
-| Red | margin < 2 min → reroute + alert |
-| Grey (node) | 3 missed heartbeats (≈ 30 s at the 10 s interval). N1's (La Crosse) interval is not yet measured (§1.3) |
+| Red | margin < 2 min → reroute + alert (the 2013 crew had under 2 min of warning, SAIT p.78) |
+| Aging (sensor node) | 1 missed heartbeat at **that sensor's own interval** |
+| Stale (sensor node) | 3 missed heartbeats at its own interval (30 s for N2/N3; 3 × the measured interval for N1, §1.3) |
 
 Every reading shows its age on the map.
 
-### 5.2 Alerts
-1. Route red / rerouted.
-2. Safety zone too small for current flame length (4× rule).
-3. Flame length over 1.2 m / 2.4 m near the crew.
-4. Node stale / lookout lost (data age).
-5. Forecast vs sensor wind disagree by > X (shows the Yarnell failure: the forecast didn't match the ground).
+### 5.2 Alerts (decided Nov 8)
+1. Active route red, or rerouted.
+2. No safe route.
+3. Sensor node stale.
+4. Ranch too small for the current flame length (radius < 4 × flame length; Butler & Cohen 1998).
 
-### 5.3 Worst-case values for a stale node
-Why: skipping a silent node lets the margin stay green on old data, the same failure as Yarnell. Worst case means the margin can only shrink, so a lost sensor gives an early warning instead of false confidence. In the demo, the silent N3 visibly greys out and the margin drops. **Proposed rules; the numbers go in `config.py` and are not decided yet:**
+Dropped: flame length over 1.2 / 2.4 m near the crew (covered by #4), forecast vs sensor wind (no forecast wind; one wind for the whole area).
+
+### 5.3 Worst-case values for a stale sensor node
+Why: skipping a silent sensor node lets the margin stay green on old data, the same failure as Yarnell. Worst case means the margin can only shrink. In the demo, the silent N3 visibly greys out and the margin drops. Defaults in `config.py` (decided Nov 8):
 
 | Input | Worst case |
 |---|---|
-| Wind speed | max(node's last reading, current max across other nodes, fixed floor `WORST_WIND_MS`) |
-| Wind direction | Unknown → assume toward each route point, i.e. head-fire rate in every direction (a circle of radius head ROS) |
-| Temp / RH | Highest recent temp and lowest recent RH, or fixed limits `WORST_TEMP_C` / `WORST_RH` |
+| Wind speed | max(last reading, `WORST_WIND_MS` = 13 m/s ≈ 30 mph, the low end of the 2013 outflow) |
+| Wind direction (N1 stale) | Unknown → head-fire rate of spread in every direction |
+| Temp / RH | max(recent temp, `WORST_TEMP_C` = 40) / min(recent RH, `WORST_RH` = 8 %) |
 
-### 5.4 How the fire is applied to routing (graph fixed, closures change)
-Like a road map with some roads closed today: the map stays the same, the route-finder just skips the closed roads.
-- **Fixed, built once:** `edges` (grid + trails + connectors, §4.1), every possible step with its walking time.
-- **Changes every recompute:** `fire_blocked(id)`, the short list of edge ids that are unsafe right now. `TRUNCATE` + `INSERT` each time; `edges` is never touched. Rebuilding 160k edges every few seconds would be slow; changing a short list is not.
+### 5.4 How the fire closes routes (graph fixed, closures change)
+Like a road map with some roads closed today: the graph (`graph.npz`, §4.6) is built once; each recompute drops the edges touching closed cells (§5 step 5) from a copy of the edge arrays and rebuilds the sparse matrix (milliseconds). There is no `fire_blocked` table.
 
-`pgr_dijkstra` takes an **SQL query that returns the edges**, so the closures are applied while the edges are read:
-```sql
-SELECT * FROM pgr_dijkstra(
-  'SELECT e.id, e.source, e.target,
-          CASE WHEN b.id IS NOT NULL THEN -1 ELSE e.cost         END AS cost,
-          CASE WHEN b.id IS NOT NULL THEN -1 ELSE e.reverse_cost END AS reverse_cost
-   FROM edges e LEFT JOIN fire_blocked b USING (id)',
-  crew_node, ARRAY[<safety zone nodes>]);
+**Example:** crew at the saddle, safety zones = ranch and the black. 16:20: nothing closed, ranch route margin 9 min → green. Outflow arrives: the canyon burns in 6 min but the crew needs 8 → canyon cells closed; the ranch route detours or dies; the black route (back uphill) becomes active, margin 4 min → **amber, rerouted, alert**.
+
+### 5.5 `engine/state` message
+```json
+{"type":"state","ts":1762600000,
+ "routes":[{"id":"ranch","margin_min":4.2,"status":"amber","active":false,
+            "path":[[-112.782,34.221],[-112.779,34.220]]},
+           {"id":"black","margin_min":11.0,"status":"green","active":true,"path":[...]}],
+ "nodes":[{"id":"N3","status":"stale","age_s":45}],
+ "fires":[{"lat":34.2215,"lon":-112.779,"ignition_ts":1762599900}],
+ "areas":{"black":<GeoJSON>,"burning":<GeoJSON>,"front_5min":<GeoJSON>,"front_10min":<GeoJSON>},
+ "alerts":["Rerouted: back to the black"],"leave_by_ts":1762600180}
 ```
-- `LEFT JOIN` keeps **every** edge; only edges in `fire_blocked` find a match.
-- `CASE … -1`: a blocked edge gets cost −1, which pgRouting treats as "doesn't exist". **Blank both `cost` and `reverse_cost`.**
-- `crew_node` = crew position snapped to the nearest node; the array = every safety zone and vehicle, snapped the same way. A path comes back for each; the fastest wins.
-
-**Order each recompute** (crew times are needed before edges can be blocked):
-1. `t_crew` per node: crew → every node, no blocking.
-2. `t_fire` per node: fire model (§2.4) ÷ safety factor.
-3. Block an edge if either end has `t_fire < t_crew`, or lies within 4 × flame length of the projected front → `fire_blocked`.
-4. Route with the query above. Margin = smallest `t_fire − t_crew` along the chosen path.
-5. A detour reaches later points later, so repeat 3–4 on the new route once or twice until it stops changing. **No path left → red "no safe route" alert.**
-
-**Example:** crew at A, safety zone Z; route 1 over the ridge, route 2 down a drainage. 14:00: nothing blocked, route 1, margin 9 min → green. 14:05: wind shift; the ridge burns in 6 min but the crew needs 8 → ridge edges into `fire_blocked`; Dijkstra picks route 2, margin 4 min → **amber, rerouted, alert**. That is the demo moment (fan on → route flips).
-
-**With scipy instead** (§4.6): same logic, copy the cost array, set blocked edges to infinity, run `dijkstra`.
+`areas` are GeoJSON (Multi)Polygons traced from the cell grid (`rasterio.features.shapes`; adds `rasterio` as a runtime dependency). The full 40k-cell grid is not sent.
 
 ---
 
@@ -472,11 +473,10 @@ SELECT * FROM pgr_dijkstra(
 - `readings(...)`: one row per `wx` message plus the Pi's receive time. **Columns not fixed yet** (`ingest.py` defines them)
 - `fire_points(...)`: from `sensors/<src>/fire`
 - `trails(..., dz, cost, reverse_cost, scouted bool, no_go bool)`
-- `grid_nodes(id, row, col, geom, elev, veg_factor)` and `grid_edges(id, source, target, cost, reverse_cost, geom)`, built in Python from the rasters (§4.1)
-- `fire_blocked(id)`: edge ids closed by the fire, rewritten every recompute (§5.4)
+- `grid_nodes(id, row, col, geom, elev, veg_factor)` and `grid_edges(...)`: optional SQL copy of `graph.npz` (routing runs in memory, §4.6)
 - `evc`, `evh` rasters (or just `veg_factor` on `grid_nodes`)
 - `dem`, `slope`, `aspect`, `fuel` raster tables (EPSG:32612)
-- `safety_zones(id, geom, radius_m)`; the radius is checked against 4 × flame height
+- `safety_zones(id, geom, radius_m)`: the ranch (radius checked against 4 × flame length) and the starting black polygon
 
 ### 6.1 Implemented MVP schema (local; deploy unchanged to Pi after review)
 
@@ -515,10 +515,16 @@ psql "$DATABASE_URL" -f schema.sql
 - No diagonal corner-cutting past an impassable cell.
 - A trail is preferred over a parallel chaparral path.
 
+**Fire spread** (to write):
+- After a wind shift, the fire turns from where it already reached (cells reached before the shift keep their arrival times).
+- Downwind cells are reached before upwind cells.
+- A cell is burning for 5 min, then black.
+
 **Margin** (to write):
 - A route the fire cuts mid-way is red even when its safety zone is still reachable.
-- Rerouting picks the alternate route.
-- A stale node goes grey and its worst-case values shrink the margin.
+- Rerouting picks the other safety zone when the ranch route is cut.
+- A stale sensor node goes grey and its worst-case values shrink the margin.
+- A hot sensor node (≥ 45 °C) creates exactly one fire point.
 
 ---
 
@@ -536,7 +542,7 @@ Mosquitto config `/etc/mosquitto/conf.d/local.conf` (verified listening on `0.0.
 listener 1883
 allow_anonymous true
 ```
-**Python project (uv)** at `/home/thunder/fire`: `uv init --python 3.13`, env in `.venv`, deps in `pyproject.toml` + `uv.lock`. Intended libraries: paho-mqtt, pyserial, fastapi, uvicorn[standard], websockets, psycopg[binary], shapely, numpy, opencv-python-headless (optional until the thermal camera). Check with `uv pip list`; teammates reproduce with `uv sync`; run with `uv run python <script>.py`. Files: `pyproject.toml`, `uv.lock`, `README.md`, `src/`, `simulator.py`.
+**Python project (uv)** at `/home/thunder/fire`: `uv init --python 3.13`, env in `.venv`, deps in `pyproject.toml` + `uv.lock`. Intended libraries: paho-mqtt, pyserial, fastapi, uvicorn[standard], websockets, psycopg[binary], shapely, numpy, scipy, rasterio, pyrothermel (§2.1). Check with `uv pip list`; teammates reproduce with `uv sync`; run with `uv run python <script>.py`. Files: `pyproject.toml`, `uv.lock`, `README.md`, `src/`, `simulator.py`.
 **Pi tips:** official 5V/5A (27 W) supply; video only via the micro-HDMI port nearest the USB-C power port; the edge power button shuts down (one press) and starts (press again, LED red → green).
 
 ### 8.2 Network
@@ -677,23 +683,23 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - [ ] Deploy the committed schema, `ingest.py`, and `ws_server.py` to the Pi; verify real MQTT messages reach both the database and WebSocket dashboard
 - [ ] Staleness monitor (fresh / aging / stale from `last_seen`) + worst-case values (§5.3)
 - [x] Coordinates decided: fake GPS per node, no tabletop transform (§1.4)
+- [x] Margin engine, fire spread and routing design settled (Nov 8 grilling; `docs/GLOSSARY.md`, `docs/adr/`, spec in `docs/specs/escape-margin/`)
 - [ ] Map + routing track: see the ordered list below
 - [ ] Build pyrothermel on the Pi 5
 - [x] Download LANDFIRE + 3DEP DEM for the Yarnell patch, reproject to EPSG:32612 (§3.1)
 - [ ] RH/temp → 1-h fuel moisture table
-- [ ] Grab the thermal camera, LoRa modules and ESP32s from the shared library
 - [ ] Questions for the operator mentor: travel speed in chaparral vs trail (calibrate the vegetation table in §4.3), acceptable margin thresholds, a quote for the pitch
 
 **Map + routing track (suggested order; 3–5 can run in parallel)**
-1. [ ] **Pull 2013 facts from the SAIT report** (§10; ADOSH report as cross-check, opens in a browser): Boulder Springs Ranch location (the 2013 safety zone, not in OSM), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed). Add the points to `data/yarnell/sites.geojson` with the report page as source; the timeline goes in a scenario file for the simulator.
-2. [ ] **Pick the 2 km × 2 km routing crop** (ridge + deployment site + ranch) **and each node's fake GPS position** (§1.4). Write a node config (e.g. `data/yarnell/nodes.json`: id → lat/lon, label); `ingest.py` fills `nodes.geom` from it.
-3. [ ] **Hand-draw 2–3 escape routes + alternates** on the Yarnell map (QGIS or geojson.io) → `data/yarnell/routes.geojson` (lon/lat).
+1. [x] **Pull 2013 facts from the SAIT report** (done Nov 8, §3.2; still to draw: the black polygon + descent line) (§10; ADOSH report as cross-check, opens in a browser): Boulder Springs Ranch location (the 2013 safety zone, not in OSM), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed). Add the points to `data/yarnell/sites.geojson` with the report page as source; the timeline goes in a scenario file for the simulator.
+2. [ ] **Routing crop decided** (centre ≈ 34.221, −112.777, §1.4); pick each sensor node's exact lat/lon (N1 ridge near saddle, N2 box canyon, N3 canyon→ranch). Write a node config (e.g. `data/yarnell/nodes.json`: id → lat/lon, label); `ingest.py` fills `nodes.geom` from it.
+3. [ ] **Hand-draw the black (~16:00) and the 2013 descent line** → `data/yarnell/scenario.geojson`; scenario simulator walks the crew from the saddle at 16:20.
 4. [ ] **Vegetation onto the grid:** EVC/EVH → `veg_factor` with the §4.3 lookup table; `config.py` flag for the 2013 replay (SH5 fuel + factor 0.1 inside the 2013 perimeter).
-5. [ ] **Decide pgRouting vs scipy** for routing (§4.6).
-6. [ ] **`build_graph.py`:** `grid_nodes`, `grid_edges`, trails + connector edges for the crop (§4.1), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
+5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
+6. [ ] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
-8. [ ] **Margin engine with fire closures** (`fire_blocked`, §5.4), with the margin checks in §7.
-9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, nodes, active route coloured by margin.
+8. [ ] **Margin engine:** fire spread (§2.4) + closures (§5.4) + `engine/state` (§5.5), with the fire and margin checks in §7.
+9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
 
 **Housekeeping**
 - [ ] Move `docs/USGS_13_n35w113.tif` (440 MB) to `data/raw/` and add `data/raw/` to `.gitignore`.
@@ -703,14 +709,10 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - [ ] `schema.sql`: drop the unused `x_cm`/`y_cm` columns at the next schema change (§6.1).
 
 **Open questions**
-- Fake GPS position per node and the exact 2 km routing crop (§1.4); depends on the ranch location from the investigation report.
-- Routing engine: pgRouting (SQL, same database) or scipy (in memory, milliseconds)? (§4.6)
-- Demo scenario: 2013 replay (SH5, old chaparral) or "if it happened today" (LF2025 fuels), or both? (§3.1)
-- Worst-case numbers `WORST_WIND_MS`, `WORST_TEMP_C`, `WORST_RH` (§5.3).
+- Resolved Nov 8: node positions and crop (§1.4), routing engine (scipy, §4.6), demo scenario (**2013 replay only**; LF2025 fuels stay a config flag), worst-case numbers (§5.3).
+- Tune on the day: hot-sensor rule (45 °C / +8 °C in 30 s), `WIND_SCALE`, `RANCH_RADIUS_M`.
 - N1 (La Crosse) transmit interval, and whether its `wind_dir` is "from" (§1.3).
 - `batt` units: the simulator sends 90 (percent?); N1 (La Crosse) sends 100/10 for ok/low; N2 and N3 send -1. Proposal: percent 0–100, -1 = unknown (all current senders already fit). Confirm what the dashboard expects.
-- Which LoRa module does the shared library have (SX1262 or SX1276)?
-- Which thermal camera (MLX90640, FLIR Lepton, other)? Decides the Python driver.
 - Is pre-written code / pre-built hardware allowed? Ask the organizers.
 - Project name: the team doc says "FireGuard", this repo says "LCES Live".
 

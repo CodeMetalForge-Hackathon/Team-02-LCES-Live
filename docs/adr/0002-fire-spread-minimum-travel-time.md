@@ -1,0 +1,3 @@
+# Fire spread by minimum travel time on the grid, not straight lines
+
+Each cell keeps a clock-time fire arrival; cells already reached are fixed, and each recompute spreads outward from the current fire front with Dijkstra over the 10 m grid (step time = length / directional rate of spread from pyrothermel, cached by fuel, slope band, aspect band and direction). We chose this over straight-line spread from each fire point (the original §2.4) because the demo must show what a wind shift does: the fire turns from where it already reached, instead of the new wind being applied as if it had always blown. It reuses the scipy graph code from ADR 0001; the starting burned area is the black at ~16:00.
