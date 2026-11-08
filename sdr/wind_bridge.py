@@ -10,7 +10,7 @@ packet never blanks the temperature (or the other way round). No packets = no he
 import json, os, sys
 
 MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
-NODE_ID = os.environ.get("NODE_ID", "W1")
+NODE_ID = os.environ.get("NODE_ID", "N1")
 SENSOR_ID = os.environ.get("SENSOR_ID")  # rtl_433 "id"; changes when the batteries come out. Unset = accept any.
 # Vane reads relative to the housing: correct when the solar panel faces south (N on the label points north).
 # Mounted another way? Add the turn here (degrees).

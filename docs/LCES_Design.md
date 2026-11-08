@@ -17,10 +17,10 @@ Core question the system answers, continuously:
 
 | Area | Status | Owner | Next step |
 |---|---|---|---|
-| Node 1: XIAO ESP32-C5 + DHT11 | Reads temp/RH on Serial | Teammate | Heartbeat JSON (§1.2), then Wi-Fi (FireNet) + MQTT publish |
-| **Wind node W1: La Crosse TX145WSDTHv3 via SDR** | **Working end to end: readings seen on the Pi broker** (§1.3) | TBD | Fan test of direction; measure transmit interval; move SDR to the Pi |
+| **Node N1: La Crosse TX145WSDTHv3 via SDR** (temp, RH, wind speed, wind direction) | **Working end to end: readings seen on the Pi broker** (verified as `W1`, renamed `N1`; §1.3) | TBD | Fan test of direction; measure transmit interval; move SDR to the Pi |
+| Node N2: XIAO ESP32-S3 + DHT11 (`firmware/weather-node`) (temp, RH) | **Working:** joins FireNet (−35 dBm with antenna), heartbeat to `sensors/N2/wx` every 10 s accepted by the Pi broker (verified Sat Nov 7) | TBD | — |
 | Pi 5 base: OS, packages, Mosquitto | Done and verified | Vivek | — |
-| FireNet hotspot on the Pi | **On**; Pi = `10.42.1.1` on FireNet (verified by the W1 bridge) | Vivek | Point all ESP32s at `10.42.1.1` |
+| FireNet hotspot on the Pi | **On**; Pi = `10.42.1.1` on FireNet (verified by the wind bridge) | Vivek | Point all ESP32s at `10.42.1.1` |
 | Laptop ↔ Pi SSH over Ethernet | Done, VS Code Remote-SSH works | Vivek | Share access with the team |
 | Simulator (fake N1–N3) | Running, verified | Vivek | Teammates copy it for local dev |
 | PostGIS database + ingest | Not started | Vivek | Create DB `fire` (`nodes`, `readings`), write `ingest.py` |
@@ -65,7 +65,7 @@ Recompute on every new reading or detection (target: < 2 s end to end).
 ### 1.2 MQTT topics and message format
 | Topic | Sent by | Content |
 |---|---|---|
-| `sensors/<node>/wx` | Sensor nodes, wind bridge, simulator | Weather heartbeat (every 10 s for ESP32 nodes; W1 per radio packet, §1.3) |
+| `sensors/<node>/wx` | Sensor nodes, wind bridge, simulator | Weather heartbeat (every 10 s for ESP32 nodes; N1 per radio packet, §1.3) |
 | `sensors/<src>/fire` | Thermal lookout | Spot-fire event with tabletop position |
 | `crew/<id>/pos` | Crew tag (optional) | Crew position |
 | `engine/state` | Margin engine | Route margins and colours (format TBD) |
@@ -77,14 +77,14 @@ JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds i
 {"type":"crew","id":"C1","x":10.0,"y":55.0}
 ```
 - `seq` counts heartbeats per node. `wind_dir` = direction the wind blows **from**, degrees. `wind_ms` = m/s.
-- Node IDs: `N1`–`N3` (ESP32 nodes / simulator), `W1` (La Crosse wind sensor).
+- **Demo nodes (2):** `N1` = La Crosse sensor via SDR, sends **temp, RH, wind speed and wind direction** (§1.3). `N2` = ESP32-S3 + DHT11, sends **temp and RH** only (§8.3). The simulator also uses `N1`–`N3` (§8.4).
 
-### 1.3 Wind node W1: La Crosse TX145WSDTHv3 over SDR (working)
+### 1.3 Node N1: La Crosse TX145WSDTHv3 over SDR (working)
 We could not get an anemometer + vane for the ESP32, so we use the outdoor unit of a **La Crosse S81120v2** station (model **TX145WSDTHv3**, FCC ID OMOTX145WSDTHv3, 433 MHz, 3×AA + solar). It sends wind speed, wind direction, temperature and humidity, so it is a complete weather node by itself.
 
 **How it works**
 ```
-TX145WSDTHv3 ──433.92 MHz OOK──► Nooelec NESDR SMArt v5 (USB) ──► rtl_433 -R 73 -F json ──► sdr/wind_bridge.py ──► MQTT sensors/W1/wx
+TX145WSDTHv3 ──433.92 MHz OOK──► Nooelec NESDR SMArt v5 (USB) ──► rtl_433 -R 73 -F json ──► sdr/wind_bridge.py ──► MQTT sensors/N1/wx
 ```
 - **Receiver:** Nooelec NESDR SMArt v5 (FCC ID 2A8GD-SMArt-V5), a standard RTL2832U dongle, so no special driver is needed. Antenna on the SMA port: a whip extended to ~17 cm, or ~17.3 cm of straight wire (quarter wave at 433.92 MHz), vertical.
 - **Decoder:** rtl_433 (25.12 used). Protocol **73** = "LaCrosse TX141-Bv2, TX141TH-Bv2, TX141-Bv3, TX141W, TX145wsdth". rtl_433 reports the sensor as model **`LaCrosse-TX141W`** and alternates two packet types:
@@ -93,16 +93,16 @@ TX145WSDTHv3 ──433.92 MHz OOK──► Nooelec NESDR SMArt v5 (USB) ──�
   ```
   plus temperature/humidity packets (`temperature_C`, `humidity`). It reports **average wind only, no gust.** The decoder in `lacrosse_breezepro.c` is for the 915 MHz LTV-WSDTH01 and does **not** apply.
 - **Bridge** (`sdr/wind_bridge.py`): filters `LaCrosse-TX141W` packets with our sensor id, keeps the latest wind and the latest temp/RH, and publishes **one full `wx` heartbeat per packet received**. That way a wind packet never blanks the temperature, and the other way round. Conversions: `wind_ms = wind_avg_km_h / 3.6`, `wind_dir = (wind_dir_deg + DIR_OFFSET) % 360`, `batt = 100` if `battery_ok` else `10` (the sensor only reports ok/low). Fields with no data yet: `temp_c = -99`, others `-1`; `flame = -1` always. It does **not** resend cached values on a timer, so a dead sensor still goes stale. Self-check: `python3 sdr/wind_bridge.py --test`.
-- **Settings** (env vars): `MQTT_HOST` (default `localhost`), `SENSOR_ID`, `NODE_ID` (default `W1`), `DIR_OFFSET` (default `0`).
+- **Settings** (env vars): `MQTT_HOST` (default `localhost`), `SENSOR_ID`, `NODE_ID` (default `N1`), `DIR_OFFSET` (default `0`).
 
 **Run** (from `Team-2/`, laptop on FireNet):
 ```bash
 rtl_433 -f 433.92M -R 73 -F json | \
-  MQTT_HOST=10.42.1.1 SENSOR_ID=51625 NODE_ID=W1 python3 sdr/wind_bridge.py
+  MQTT_HOST=10.42.1.1 SENSOR_ID=51625 python3 sdr/wind_bridge.py
 # check, on the Pi or any FireNet machine:
 mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 ```
-**Verified Sat Nov 7:** laptop (SDR attached) on FireNet → `sensors/W1/wx` messages seen on the Pi broker.
+**Verified Sat Nov 7:** laptop (SDR attached) on FireNet → messages seen on the Pi broker (then published as `W1`; the node is now `N1`).
 
 **Setup and gotchas**
 - One-time on the host: `blacklist dvb_usb_rtl28xxu` in `/etc/modprobe.d/` (else the TV-tuner kernel driver grabs the dongle).
@@ -114,7 +114,7 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 
 **Still to verify**
 - [ ] Fan test: blow from a known compass direction and confirm `wind_dir` = direction the wind comes **from** (§2.2 relies on this). Set `DIR_OFFSET` if needed.
-- [ ] Transmit interval: time between consecutive `sensors/W1/wx` messages. If it is longer than ~10 s, the 3-heartbeat stale rule (§5.1) needs a per-node threshold for W1.
+- [ ] Transmit interval: time between consecutive `sensors/N1/wx` messages. If it is longer than ~10 s, the 3-heartbeat stale rule (§5.1) needs a per-node threshold for N1.
 
 ### 1.4 Coordinates
 **Messages use tabletop centimetres; the engine computes in real metres.**
@@ -144,9 +144,9 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 |---|---|---|
 | `fuel_model` | `FuelModel.from_existing(<int>)` with the LANDFIRE **FBFM40** cell value | The integer IDs equal LANDFIRE codes (101 = GR1, 145 = SH5). 91–99 = non-burnable → spread 0, so they act as natural barriers. Demo default: `SH5` (chaparral, Yarnell) |
 | `moisture_scenario` | Demo: `MoistureScenario.from_existing(1, 2)`. Live: `MoistureScenario(one_hr, ten_hr, hundred_hr, live_herb, live_woody)` as fractions | **TODO:** 1-h moisture from node temp + RH using the Rothermel 1983 (INT-GTR-143) table, about 10 lines. 10-h ≈ 1-h + 1%, 100-h ≈ 1-h + 2% |
-| `wind_speed` | `wind_ms` from the nodes, **km/h** (`× 3.6`) | Use the **highest recent `wind_ms`** (conservative). W1 reports averages only, no gust |
+| `wind_speed` | `wind_ms` from the nodes, **km/h** (`× 3.6`) | Use the **highest recent `wind_ms`** (conservative). N1 (La Crosse) reports averages only, no gust |
 | `wind_input_mode` | `'direct_midflame'` for nodes mounted ~1–2 m | Use `'ten_meter'` (+ canopy_cover/height/ratio) for **forecast** winds. 20 km/h at 10 m becomes ~9.5 km/h midflame, which more than halves the spread rate |
-| `wind_direction` | **`wind_dir`, direction the wind blows FROM** | Verified in pyrothermel: 225 in → head runs toward 45. **No +180 needed.** W1's convention still needs the fan test (§1.3) |
+| `wind_direction` | **`wind_dir`, direction the wind blows FROM** | Verified in pyrothermel: 225 in → head runs toward 45. **No +180 needed.** N1's convention still needs the fan test (§1.3) |
 | `slope` | Degrees, from the slope raster **at the fire point** | Conservative option: steepest upslope sampled along the fire→target line |
 | `aspect` | Degrees from north, direction the slope **faces (downhill)**, at the fire point | Same convention as `gdaldem aspect` |
 
@@ -298,7 +298,7 @@ Every recompute:
 | Green | margin ≥ 5 min |
 | Amber | 2 min ≤ margin < 5 min, **or** margin dropped > 30% since the last update |
 | Red | margin < 2 min → reroute + alert |
-| Grey (node) | 3 missed heartbeats (≈ 30 s at the 10 s interval). W1's interval is not yet measured (§1.3) |
+| Grey (node) | 3 missed heartbeats (≈ 30 s at the 10 s interval). N1's (La Crosse) interval is not yet measured (§1.3) |
 
 Every reading shows its age on the map.
 
@@ -377,7 +377,7 @@ allow_anonymous true
 
 ### 8.2 Network
 - **Venue Wi-Fi isolates devices** (laptop and Pi on venue Wi-Fi could not ping each other). Nothing on the venue Wi-Fi can reach the Pi.
-- **FireNet hotspot (on):** SSID `FireNet`, password `firenet123`. Pi = **`10.42.1.1`**. ESP32 nodes and the W1 bridge publish here. Started with `sudo nmcli device wifi hotspot ssid FireNet password firenet123`. It takes the Pi off venue Wi-Fi (no internet), so install packages first. FireNet itself has no internet either.
+- **FireNet hotspot (on):** SSID `FireNet`, password `firenet123`. Pi = **`10.42.1.1`**. The ESP32 node and the wind bridge publish here. Started with `sudo nmcli device wifi hotspot ssid FireNet password firenet123`. It takes the Pi off venue Wi-Fi (no internet), so install packages first. FireNet itself has no internet either.
 - **Direct Ethernet:** Pi = `10.42.0.1` (`ipv4.method shared`; the laptop gets an address automatically). One-time on the Pi:
   ```
   sudo systemctl enable --now ssh
@@ -387,7 +387,11 @@ allow_anonymous true
   Connect: `ssh thunder@10.42.0.1` (password: ask Vivek; reset with `sudo passwd thunder`). Passwordless: `ssh-copy-id thunder@10.42.0.1` (don't overwrite your key with `ssh-keygen`); from Windows PowerShell: `type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh thunder@10.42.0.1 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"`. WSL and Windows keep separate keys; VS Code uses the Windows one.
 - **VS Code Remote-SSH:** "Remote - SSH" extension → F1 → Remote-SSH: Connect to Host → `thunder@10.42.0.1` → Open Folder `/home/thunder/fire`. Install the Python extension "in SSH" and select `./.venv`.
 
-### 8.3 Node 1: XIAO ESP32-C5 + DHT11
+### 8.3 Node N2 (ESP32)
+**Node N2 is a XIAO ESP32-S3** with the PlatformIO firmware in `firmware/weather-node` (DHT11 on D3, LED on D4, node ID `N2`, Wi-Fi FireNet → `10.42.1.1`). Build/flash: `cd firmware/weather-node && pio run -t upload && pio device monitor`. At boot it prints FireNet's signal strength, and while connecting the Wi-Fi status (1 = network not seen, 4 = connect failed / password, 6 = disconnected / retrying). **The XIAO ESP32-S3 needs its U.FL antenna attached:** without it FireNet showed −82 dBm and it never connected (status 6); with it −35 dBm and it connected at once.
+
+Earlier ESP32-C5 notes, kept for reference:
+
 Grove DHT11 on D0 (GPIO1), powered from 3V3 (never 5V), Grove-to-male-jumper cable, XIAO straddling the breadboard's centre gap.
 
 | DHT11 pin | Wire | XIAO pin |
@@ -401,7 +405,6 @@ Grove DHT11 on D0 (GPIO1), powered from 3V3 (never 5V), Grove-to-male-jumper cab
 - Pin map: D0 = GPIO1, D1 = GPIO0, D2 = GPIO25 (strapping, avoid), D3 = GPIO7 (strapping, avoid), D4 = GPIO23 (SDA), D5 = GPIO24 (SCL), D6 = GPIO11 (TX). **Avoid strapping pins GPIO2, 3, 7, 25, 26, 27, 28.**
 - Arduino IDE 2.3.10, board "ESP32C5 Dev Module", Serial Monitor 115200. Libraries: "DHT sensor library" (Adafruit) + "Adafruit Unified Sensor"; MQTT: PubSubClient (Nick O'Leary). With Dev Module selected use `#define DHTPIN 1` (`D0` only exists with board "XIAO_ESP32C5"). Fallback library: "DHT sensor library for ESPx" (beegee_tokyo).
 - Lessons: program prints appear in the Serial Monitor, not the Output panel. `DHTPIN 25` (D2, strapping) caused "Sensor reading failed". Grove-to-Grove cables don't fit the XIAO. XIAO on one half of the breadboard shorts left and right pins. Upload stuck: hold BOOT, tap RESET, release BOOT, upload again.
-- Next: heartbeat JSON every 10 s in the §1.2 format (`wind_ms`/`wind_dir`/`flame`/`batt` = -1), then Wi-Fi (FireNet) + MQTT publish to `sensors/N1/wx` at `10.42.1.1`.
 
 ### 8.4 Simulator
 `~/fire/simulator.py` on the Pi pretends to be N1–N3, so backend and dashboard can be built before the hardware. Code in Appendix A. Every 10 s it publishes one heartbeat per node to `sensors/<node>/wx`, and acts out the two demo situations:
@@ -430,8 +433,8 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 **Next steps**
 - [ ] Vivek: PostGIS database `fire` (`nodes`, `readings`) + `ingest.py` (MQTT → database)
 - [ ] Teammate: `ws_server.py` working locally against the simulator
-- [ ] Node 1: heartbeat JSON, then Wi-Fi (FireNet) + MQTT publish to `10.42.1.1`
-- [ ] W1: fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
+- [x] ESP32-S3 node: on FireNet, publishing heartbeats (as `N2`, verified Sat Nov 7)
+- [ ] N1 (La Crosse): fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
 - [ ] Staleness monitor (fresh / aging / stale from `last_seen`) + worst-case values (§5.3)
 - [ ] Decide the tabletop ↔ UTM transform (§1.4)
 - [ ] Trail graph for the tabletop in PostGIS + pgRouting, then the margin engine
@@ -444,19 +447,19 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 **Open questions**
 - Tabletop size, `SCALE`, origin `E0/N0`, and Yarnell patch (§1.4).
 - Worst-case numbers `WORST_WIND_MS`, `WORST_TEMP_C`, `WORST_RH` (§5.3).
-- W1 transmit interval, and whether its `wind_dir` is "from" (§1.3).
-- `batt` units: the simulator sends 90 (percent?); W1 sends 100/10 for ok/low. Confirm what the dashboard expects.
+- N1 (La Crosse) transmit interval, and whether its `wind_dir` is "from" (§1.3).
+- `batt` units: the simulator sends 90 (percent?); N1 (La Crosse) sends 100/10 for ok/low; N2 sends -1. Confirm what the dashboard expects.
 - Which LoRa module does the shared library have (SX1262 or SX1276)?
 - Which thermal camera (MLX90640, FLIR Lepton, other)? Decides the Python driver.
 - Is pre-written code / pre-built hardware allowed? Ask the organizers.
 - Project name: the team doc says "FireGuard", this repo says "LCES Live".
-- **Repo firmware mismatch:** `firmware/weather-node` (PlatformIO) targets a XIAO **ESP32-S3** with the DHT on D3, and publishes the old format to `lces/node/N1/reading`. Node 1 per §8.3 is a XIAO **ESP32-C5** (Arduino IDE, DHT on D0) publishing to `sensors/N1/wx`. Which is current? (Its Wi-Fi is already set to FireNet / `10.42.1.1`.)
 
 **Gotchas**
 - Never put 5 V on an ESP32 pin; power sensors from 3V3. Avoid strapping pins GPIO2, 3, 7, 25, 26, 27, 28.
 - Venue Wi-Fi isolates devices: use FireNet (`10.42.1.1`) or the cable (`10.42.0.1`).
 - FireNet has no internet, and turning it on takes the Pi off venue Wi-Fi. Install packages first (Pi and laptop).
 - New terminals on the Pi: `cd ~/fire` and use `uv run`, or activate `.venv`.
+- **Don't run the simulator alongside the real nodes:** it also publishes `sensors/N1/wx` and `sensors/N2/wx`.
 - `mosquitto_sub` looks stuck when nothing is publishing; it is just waiting (Ctrl+C to stop).
 - paho-mqtt 2.x needs `mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)`.
 - SDR: only one program can hold the dongle (`usb_claim_interface error -6`); the La Crosse id changes on battery swap (§1.3).
