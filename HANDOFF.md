@@ -84,8 +84,8 @@ local markdown tickets. Still no GitHub Issues.)
 | 10 | Route hover tooltip (crew vs fire time, margin here); tightest-point ring | dashboard | **done** (hover not checked yet) |
 | 09 | Sensor node hover popups; remove "Sensor feed" panel; "direction unknown" | dashboard | **done** |
 | 06 | Label Boulder Springs Ranch + 100 m circle, "2013 deployment site"; remove `sites.geojson` layer | dashboard | **done** |
-| 07 | `render_map_layers.py` → `terrain.png`, `fuel.png`, `map_osm.geojson` | data | next |
-| 08 | Coloured backdrop, fuel toggle, roads/buildings | dashboard | |
+| 07 | `render_map_layers.py` → `terrain.png`, `fuel.png`, `map_osm.geojson` | data | **done** (09:20) |
+| 08 | Coloured backdrop + Layers panel (terrain / slope / hillshade; fuel, roads+buildings, perimeter), 12 km display area (`data/yarnell/wide/`) | dashboard | **done** (09:40) |
 | 11 | Re-plan animation (banner, pulse from crew, route drawn via `line-gradient`/`line-progress`); now mainly at Start | dashboard | **done** (08:45) |
 | 12 | Optional aerial imagery | data | needs-triage |
 | 13 | Wind smoothing: moving average (20 s, direction as a vector), rounded 5° / 0.5 m/s up | engine | **done** |

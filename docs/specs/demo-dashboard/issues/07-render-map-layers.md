@@ -1,6 +1,6 @@
 # 07 Data: render terrain.png, fuel.png, map_osm.geojson
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Blocked by: none
 
@@ -18,3 +18,6 @@ New `render_map_layers.py` (numpy + rasterio, already dependencies), run once on
 
 ## Acceptance
 - PNGs open, 500 × 500, line up with `hillshade.png` (same corners in `meta.json`); `map_osm.geojson` < 300 KB.
+
+## Comments
+- Done (Nov 8 ~09:20, Vivek's Claude session): `render_map_layers.py` writes `terrain.png` (elevation ramp x hillshade, 274 KB), `fuel.png` (FBFM40 groups, SH5 inside the 2013 perimeter like `build_graph.py`, 18 KB) and `map_osm.geojson` (154 roads, 30 tracks, 434 buildings; footways dropped, 215 KB). Same grid/corners as `hillshade.png`.

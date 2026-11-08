@@ -9,12 +9,15 @@ const FPS = 20;
 // colours (rgb + alpha 0-255) match the legend
 const BLACK = [11, 11, 12, 150], HOT = [240, 120, 52, 205], EMBER = [150, 50, 42, 165];
 const FRONT5 = [207, 122, 82, 92], FRONT10 = [217, 169, 90, 58];
+// the fire grid (engine area) is smaller than the 12 km backdrop: fade its outer cells so it doesn't end in a hard box
+const EDGE_FADE_CELLS = 25;
 
 export class FireLayer {
   private canvas = document.createElement("canvas");
   private ctx = this.canvas.getContext("2d")!;
   private img?: ImageData;
   private arr?: Float32Array;          // upsampled arrival, s after t0
+  private fade?: Float32Array;         // 0..1 alpha multiplier, 0 at the grid edge
   private burnout = 300;
   private stateRel = 0;                 // scenario seconds (ts - t0) of the latest message
   private rxAt = 0;                     // performance.now() when it arrived
@@ -51,6 +54,12 @@ export class FireLayer {
       this.canvas.width = W; this.canvas.height = H;
       this.img = this.ctx.createImageData(W, H);
       (this.map.getSource("fire") as CanvasSource | undefined)?.setCoordinates(grid.corners);
+      const f = new Float32Array(W * H), edge = EDGE_FADE_CELLS * UP;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const t = Math.min(1, Math.min(x, y, W - 1 - x, H - 1 - y) / edge);
+        f[y * W + x] = t * t * (3 - 2 * t);           // smoothstep
+      }
+      this.fade = f;
       this.key = key;
     }
     const a = this.arr?.length === W * H ? this.arr : new Float32Array(W * H);
@@ -72,7 +81,7 @@ export class FireLayer {
     if (!a || !img) return;
     // scenario time now: latest message + time since it arrived (capped, so a stalled engine doesn't run ahead)
     const now = this.stateRel + Math.min((performance.now() - this.rxAt) / 1000, 1.5);
-    const d = img.data, burn = this.burnout;
+    const d = img.data, burn = this.burnout, fade = this.fade;
     for (let i = 0, p = 0; i < a.length; i++, p += 4) {
       const age = now - a[i];
       let c: number[] | null;
@@ -80,10 +89,10 @@ export class FireLayer {
       else if (age >= 0) {                                  // burning: bright at the front, fading to embers
         const k = age / burn;
         d[p] = HOT[0] + (EMBER[0] - HOT[0]) * k; d[p + 1] = HOT[1] + (EMBER[1] - HOT[1]) * k;
-        d[p + 2] = HOT[2] + (EMBER[2] - HOT[2]) * k; d[p + 3] = HOT[3] + (EMBER[3] - HOT[3]) * k;
+        d[p + 2] = HOT[2] + (EMBER[2] - HOT[2]) * k; d[p + 3] = (HOT[3] + (EMBER[3] - HOT[3]) * k) * (fade ? fade[i] : 1);
         continue;
       } else c = age >= -300 ? FRONT5 : age >= -600 ? FRONT10 : null;
-      if (c) { d[p] = c[0]; d[p + 1] = c[1]; d[p + 2] = c[2]; d[p + 3] = c[3]; } else d[p + 3] = 0;
+      if (c) { d[p] = c[0]; d[p + 1] = c[1]; d[p + 2] = c[2]; d[p + 3] = c[3] * (fade ? fade[i] : 1); } else d[p + 3] = 0;
     }
     this.ctx.putImageData(img, 0, 0);
   }

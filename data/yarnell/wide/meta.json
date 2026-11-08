@@ -1,0 +1,38 @@
+{
+ "crs": "EPSG:32612",
+ "res_m": 10,
+ "size_px": 1200,
+ "bounds_utm": [
+  331140,
+  3782020,
+  343140,
+  3794020
+ ],
+ "corners_lonlat_tl_tr_br_bl": [
+  [
+   -112.83430911165962,
+   34.273641701988524
+  ],
+  [
+   -112.70400700752619,
+   34.275523285803146
+  ],
+  [
+   -112.70182962927235,
+   34.16734809818138
+  ],
+  [
+   -112.83196545260003,
+   34.165474093832934
+  ]
+ ],
+ "elev_m": [
+  898.4,
+  1851.1
+ ],
+ "sources": {
+  "dem": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer",
+  "fuel": "https://lfps.usgs.gov/arcgis/rest/services/Landfire_LF2025/LF2025_FBFM40_CONUS/ImageServer",
+  "osm": "OpenStreetMap contributors, ODbL, via Overpass"
+ }
+}

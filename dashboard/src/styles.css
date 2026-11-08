@@ -300,3 +300,28 @@ h2 {
 .pulse-marker i + i { animation-delay: .5s; }
 @keyframes replan-pulse { from { transform: scale(.5); opacity: .95; } to { transform: scale(5); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .pulse-marker i, .replan-spinner { animation: none; } }
+
+/* ---- map layer switch (ticket 08) ---- */
+.layer-switch {
+  position: fixed; z-index: 10; top: 132px; right: 16px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+}
+.layers-btn {
+  display: flex; align-items: center; gap: 6px;
+  font: inherit; font-size: .74rem; letter-spacing: .04em; color: var(--dim); cursor: pointer;
+  background: var(--panel); backdrop-filter: blur(8px); border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); padding: 6px 11px; box-shadow: var(--shadow-float);
+}
+.layers-btn svg { width: 15px; height: 15px; }
+.layers-btn.on, .layers-btn:hover { color: var(--text); }
+.layers-panel {
+  min-width: 220px; padding: 10px 13px; font-size: .74rem; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-float);
+}
+.layers-panel h3 { margin: 4px 0 6px; font-size: .62rem; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+.layers-panel h3 + label { margin-top: 0; }
+.layers-panel label { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; }
+.layers-panel input { accent-color: #50bb9d; margin: 0; }
+.layers-panel h3:not(:first-child) { margin-top: 10px; }
+.layer-key { list-style: none; margin: 10px 0 0; padding: 8px 0 0; border-top: 1px solid var(--border-soft); font-size: .7rem; }
+.layer-key li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.layer-key li i { width: 14px; height: 10px; border-radius: 2px; flex: none; }

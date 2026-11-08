@@ -4,7 +4,13 @@ import type { GeoJSONSource, Map } from "maplibre-gl";
 // MapLibre v6 loads its worker from a separate file; the Vite build must ship it, or no GeoJSON layer draws.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import type { Feature, FeatureCollection } from "geojson";
-import hillshadeUrl from "../../data/yarnell/hillshade.png";
+// backdrop: 12 km x 12 km display layers (render_map_layers.py); the engine works on the 5 km crop inside it
+import terrainUrl from "../../data/yarnell/wide/terrain.png";
+import fuelUrl from "../../data/yarnell/wide/fuel.png";
+import slopeUrl from "../../data/yarnell/wide/slope.png";
+import hillshadeUrl from "../../data/yarnell/wide/hillshade.png";
+import osmRaw from "../../data/yarnell/wide/map_osm.geojson?raw";
+import wideMetaRaw from "../../data/yarnell/wide/meta.json?raw";
 import perimeterRaw from "../../data/yarnell/perimeter.geojson?raw";
 import scenarioRaw from "../../data/yarnell/scenario.geojson?raw";
 import metaRaw from "../../data/yarnell/meta.json?raw";
@@ -14,17 +20,18 @@ import { FireLayer } from "./fireLayer";
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
 type Corners = [[number, number], [number, number], [number, number], [number, number]];
-const corners = JSON.parse(metaRaw).corners_lonlat_tl_tr_br_bl as Corners;
+const corners = JSON.parse(wideMetaRaw).corners_lonlat_tl_tr_br_bl as Corners;
+// keep the view on the backdrop (no panning into the empty background)
+// first view: the 5 km area the engine models (meta.json), so the setting reads before zooming in
+const engineCorners = JSON.parse(metaRaw).corners_lonlat_tl_tr_br_bl as Corners;
+const engineBounds = [[Math.min(...engineCorners.map(c => c[0])), Math.min(...engineCorners.map(c => c[1]))],
+                      [Math.max(...engineCorners.map(c => c[0])), Math.max(...engineCorners.map(c => c[1]))]] as [[number, number], [number, number]];
+const wideBounds = [[Math.min(...corners.map(c => c[0])), Math.min(...corners.map(c => c[1]))],
+                    [Math.max(...corners.map(c => c[0])), Math.max(...corners.map(c => c[1]))]] as [[number, number], [number, number]];
 const perimeter = JSON.parse(perimeterRaw) as FeatureCollection;
+const osm = JSON.parse(osmRaw) as FeatureCollection;   // roads, tracks, buildings (render_map_layers.py)
 const scenario = JSON.parse(scenarioRaw) as FeatureCollection;
 const descentLine: FeatureCollection = { type: "FeatureCollection", features: scenario.features.filter(f => f.geometry.type === "LineString") };
-// zoom to the 2013 crew area (descent line, crew start, ranch), not the whole hillshade
-const scenarioBounds = (() => {
-  const xs: number[] = [], ys: number[] = [];
-  const walk = (c: any): void => { if (typeof c[0] === "number") { xs.push(c[0]); ys.push(c[1]); } else c.forEach(walk); };
-  scenario.features.filter(f => f.geometry.type !== "Polygon").forEach(f => walk((f.geometry as any).coordinates));
-  return [[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.max(...ys)]] as [[number, number], [number, number]];
-})();
 const empty: FeatureCollection = { type: "FeatureCollection", features: [] };
 // 2013 places, labelled with HTML markers (MapLibre text needs a glyph server, which FireNet doesn't have)
 const placeAt = (name: string) => (scenario.features.find(f => f.properties?.name === name)?.geometry as any)?.coordinates as [number, number] | undefined;
@@ -118,13 +125,26 @@ function engineLayers(engine: EngineState): Record<string, FeatureCollection> {
 }
 
 function addLayers(map: Map) {
+  // backdrop (ticket 08): coloured relief from dem.tif, fuel overlay (toggle), roads and buildings from OSM
+  map.addSource("terrain", { type: "image", url: terrainUrl, coordinates: corners });
+  map.addLayer({ id: "terrain", type: "raster", source: "terrain", paint: { "raster-opacity": 1, "raster-fade-duration": 0 } });
+  map.addSource("slope", { type: "image", url: slopeUrl, coordinates: corners });
+  map.addLayer({ id: "slope", type: "raster", source: "slope", layout: { visibility: "none" }, paint: { "raster-fade-duration": 0 } });
   map.addSource("hillshade", { type: "image", url: hillshadeUrl, coordinates: corners });
-  map.addLayer({ id: "hillshade", type: "raster", source: "hillshade", paint: { "raster-opacity": .68, "raster-saturation": -.75 } });
+  map.addLayer({ id: "hillshade", type: "raster", source: "hillshade", layout: { visibility: "none" }, paint: { "raster-opacity": .8, "raster-fade-duration": 0 } });
+  map.addSource("fuel", { type: "image", url: fuelUrl, coordinates: corners });
+  map.addLayer({ id: "fuel", type: "raster", source: "fuel", layout: { visibility: "none" }, paint: { "raster-opacity": .85, "raster-fade-duration": 0 } });
+  map.addSource("osm", { type: "geojson", data: osm });
+  map.addLayer({ id: "osm-buildings", type: "fill", source: "osm", filter: ["==", ["get", "kind"], "building"], paint: { "fill-color": "#5b4f43", "fill-opacity": .8 } });
+  map.addLayer({ id: "osm-tracks", type: "line", source: "osm", filter: ["==", ["get", "kind"], "track"], paint: { "line-color": "#f4ead8", "line-width": 1, "line-opacity": .7, "line-dasharray": [3, 2] } });
+  map.addLayer({ id: "osm-roads", type: "line", source: "osm", filter: ["==", ["get", "kind"], "road"], paint: { "line-color": "#fbf6ec", "line-width": ["interpolate", ["linear"], ["zoom"], 12, .8, 16, 2.5], "line-opacity": .85 } });
   map.addSource("perimeter", { type: "geojson", data: perimeter });
   map.addLayer({ id: "perimeter-line", type: "line", source: "perimeter", paint: { "line-color": "#c76a5e", "line-width": 1.5, "line-dasharray": [3, 2], "line-opacity": .7 } });
   map.addSource("descent", { type: "geojson", data: descentLine });
   map.addLayer({ id: "descent", type: "line", source: "descent", paint: { "line-color": "#e8eef0", "line-width": 1.5, "line-dasharray": [1, 2], "line-opacity": .8 } });
   map.addSource("routes", { type: "geojson", data: empty });
+  map.addLayer({ id: "routes-casing", type: "line", source: "routes", layout: { "line-cap": "round", "line-join": "round" }, paint: {
+    "line-color": "#14181b", "line-width": ["case", ["get", "active"], 10, 6.5], "line-opacity": .7 } });
   map.addLayer({ id: "routes", type: "line", source: "routes", layout: { "line-cap": "round", "line-join": "round" }, paint: {
     "line-color": ["match", ["get", "status"], "green", "#50bb9d", "amber", "#d9a95a", "red", "#cf6a60", "#8c9691"],
     "line-width": ["case", ["get", "active"], 7, 4], "line-opacity": ["case", ["get", "active"], 1, .75] } });
@@ -193,6 +213,15 @@ function WindPanel({ engine }: { engine: EngineState }) {
     </div></section>;
 }
 
+type BaseLayer = "terrain" | "slope" | "hillshade";
+const BASE_LAYERS: [BaseLayer, string][] = [["terrain", "Terrain (elevation)"], ["slope", "Slope"], ["hillshade", "Hillshade (grey)"]];
+// slope.png colours (render_map_layers.py SLOPE_RAMP)
+const SLOPE_KEY: [string, string][] = [["rgb(88,150,96)", "Flat (0°)"], ["rgb(186,196,92)", "10°"], ["rgb(232,188,76)", "20°"],
+  ["rgb(226,128,60)", "30°"], ["rgb(178,52,48)", "45°+ (steep: fire runs uphill fast)"]];
+// fuel.png colours (render_map_layers.py FUEL_RGBA)
+const FUEL_KEY: [string, string][] = [["rgb(236,214,110)", "Grass"], ["rgb(204,178,98)", "Grass-shrub"], ["rgb(128,146,58)", "Shrub"],
+  ["rgb(86,104,40)", "Old chaparral (SH5, 2013 burn area)"], ["rgb(62,122,66)", "Timber"]];
+
 function Legend() {
   const [open, setOpen] = useState(false);
   const line = (color: string, dash?: string, width = 4) => <svg width="30" height="10"><line x1="2" y1="5" x2="28" y2="5" stroke={color} strokeWidth={width} strokeDasharray={dash} strokeLinecap="round" /></svg>;
@@ -213,6 +242,9 @@ function Legend() {
     [fill("#cf7a52", .36), "Fire within 5 min"],
     [fill("#d9a95a", .23), "Fire in 5–10 min"],
     [fill("#5e9ed6", .15, "#5e9ed6"), "Ranch safety zone"],
+    [line("#fbf6ec", undefined, 2), "Road"],
+    [line("#f4ead8", "3 2", 1.5), "Track"],
+    [fill("#5b4f43", .8), "Building"],
     [person, "Crew"],
     [dot("#5e9ed6", "#0e1215"), "Sensor: live"],
     [dot("#d9a95a", "#0e1215"), "Aging"],
@@ -241,6 +273,10 @@ export default function App() {
   const nodeHover = useRef<{ popup: maplibregl.Popup; id: string } | null>(null);
   const sensorsRef = useRef<Record<string, SensorReading>>({});
   const [bearing, setBearing] = useState(0);
+  // map layers (ticket 08): one base raster + overlays
+  const [base, setBase] = useState<BaseLayer>("terrain");
+  const [overlays, setOverlays] = useState({ fuel: false, osm: true, perimeter: true });
+  const [layersOpen, setLayersOpen] = useState(false);
   // re-plan animation (ticket 11): set when engine/state.replan_ts changes while the page is open
   const [replan, setReplan] = useState<{ key: number; kind: "start" | "reroute"; stage: "planning" | "done" } | null>(null);
   const [drawing, setDrawing] = useState(false);
@@ -252,11 +288,11 @@ export default function App() {
 
   useEffect(() => {
     if (!mapElement.current || map.current) return;
-    const instance = new maplibregl.Map({ container: mapElement.current, center: [-112.775, 34.22], zoom: 12.7,
+    const instance = new maplibregl.Map({ container: mapElement.current, center: [-112.775, 34.22], zoom: 12.7, maxBounds: wideBounds, minZoom: 11.5,
       style: { version: 8, sources: {}, layers: [{ id: "background", type: "background", paint: { "background-color": "#0e1215" } }] } });
     map.current = instance;
     // pad so the floating top bar and left rail don't cover the 2013 scenario area
-    instance.on("load", () => { addLayers(instance); fireLayer.current = new FireLayer(instance, "descent"); instance.fitBounds(scenarioBounds, { padding: { top: 150, bottom: 80, left: 400, right: 80 } }); setMapReady(true); });
+    instance.on("load", () => { addLayers(instance); fireLayer.current = new FireLayer(instance, "descent"); instance.fitBounds(engineBounds, { padding: { top: 70, bottom: 20, left: 390, right: 20 } }); setMapReady(true); });
     // route tooltip: nearest path point to the pointer (hover, or tap on touch)
     const showRoute = (e: maplibregl.MapLayerMouseEvent) => {
       const id = e.features?.[0]?.properties?.id as string | undefined;
@@ -351,6 +387,15 @@ export default function App() {
     setReplan({ key: r, kind, stage: "planning" });
   }, [engine, engineAt]);
 
+  useEffect(() => {
+    const m = map.current;
+    if (!mapReady || !m) return;
+    const vis = (id: string, on: boolean) => m.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+    BASE_LAYERS.forEach(([id]) => vis(id, id === base));
+    vis("fuel", overlays.fuel);
+    ["osm-buildings", "osm-tracks", "osm-roads"].forEach(id => vis(id, overlays.osm));
+    vis("perimeter-line", overlays.perimeter);
+  }, [base, overlays, mapReady]);
   useEffect(() => { if (mapReady && map.current) setRouteFilters(map.current, drawing, cutId); }, [drawing, cutId, mapReady]);
 
   // banner timing, pulse from the crew, and the active route drawn progressively
@@ -469,6 +514,22 @@ export default function App() {
     </aside>
 
     <div className="compass" title="North"><div style={{ transform: `rotate(${-bearing}deg)` }}><svg viewBox="-24 -24 48 48"><circle r="22" className="compass-ring" /><path d="M0,-17 L6,2 L0,-2 L-6,2 Z" className="compass-n" /><path d="M0,17 L6,-2 L0,2 L-6,-2 Z" className="compass-s" /><text y="-4" dy="-14" className="compass-label">N</text></svg></div></div>
+    <div className="layer-switch">
+      <button className={`layers-btn ${layersOpen ? "on" : ""}`} onClick={() => setLayersOpen(v => !v)} aria-expanded={layersOpen} title="Map layers">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /><path d="m3 13 9 5 9-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" /></svg>Layers
+      </button>
+      {layersOpen && <div className="layers-panel">
+        <h3>Base map</h3>
+        {BASE_LAYERS.map(([id, label]) => <label key={id}><input type="radio" name="base" checked={base === id} onChange={() => setBase(id)} />{label}</label>)}
+        <h3>Overlays</h3>
+        {([["fuel", "Fuel (vegetation)"], ["osm", "Roads and buildings"], ["perimeter", "2013 fire perimeter"]] as const).map(([k, label]) =>
+          <label key={k}><input type="checkbox" checked={overlays[k]} onChange={() => setOverlays(o => ({ ...o, [k]: !o[k] }))} />{label}</label>)}
+        {(base === "slope" || overlays.fuel) && <ul className="layer-key">
+          {base === "slope" && SLOPE_KEY.map(([c, t]) => <li key={t}><i style={{ background: c }} />{t}</li>)}
+          {overlays.fuel && FUEL_KEY.map(([c, t]) => <li key={t}><i style={{ background: c }} />{t}</li>)}
+        </ul>}
+      </div>}
+    </div>
     <div className="map-note">Hover a route or a sensor node for live times and readings</div>
   </main>;
 }
