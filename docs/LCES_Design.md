@@ -23,8 +23,8 @@ Core question the system answers, continuously:
 | FireNet hotspot on the Pi | **On**; Pi = `10.42.1.1` on FireNet (verified by the wind bridge) | Vivek | Point all ESP32s at `10.42.1.1` |
 | Laptop ↔ Pi SSH over Ethernet | Done, VS Code Remote-SSH works | Vivek | Share access with the team |
 | Simulator (fake N1–N3) | Running, verified | Vivek | Teammates copy it for local dev |
-| PostGIS database + ingest | Not started | Vivek | Create DB `fire` (`nodes`, `readings`), write `ingest.py` |
-| WebSocket server (FastAPI) | Not started | Teammate | Appendix B |
+| PostGIS database + ingest | **Implemented and verified locally with simulator data** | Teammate | Deploy to the Pi database; verify real Pi MQTT messages are stored |
+| WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
 | Margin engine | Not started | Vivek | After ingest: staleness, trail graph, fire/escape model |
 | Flame sensor | Not started | TBD | — |
@@ -78,6 +78,27 @@ JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds i
 ```
 - `seq` counts heartbeats per node. `wind_dir` = direction the wind blows **from**, degrees. `wind_ms` = m/s.
 - **Demo nodes (2):** `N1` = La Crosse sensor via SDR, sends **temp, RH, wind speed and wind direction** (§1.3). `N2` = ESP32-S3 + DHT11, sends **temp and RH** only (§8.3). The simulator also uses `N1`–`N3` (§8.4).
+
+### 1.2.1 Backend implementation update (local, Nov 8)
+
+The MQTT-to-dashboard and MQTT-to-database MVP is implemented in the repository root:
+
+| File | Purpose | Local verification completed |
+|---|---|---|
+| `ws_server.py` | FastAPI service. Subscribes to `sensors/#`, `engine/#`, and `crew/#`; wraps each MQTT JSON payload in `{topic, rx_ts, data}`; broadcasts it to `/ws`; exposes the latest per-topic cache at `/api/sensors/latest`. | Uvicorn started successfully; MQTT connection and `/api/sensors/latest` cache verified with simulator messages. |
+| `ingest.py` | Subscribes to `sensors/+/wx`, validates weather messages, converts missing `-1`/`-99` values to SQL `NULL`, upserts `nodes.last_seen`, and inserts readings. | Simulator messages were persisted and queried from PostgreSQL. |
+| `schema.sql` | Creates the PostGIS extension plus `nodes`, `readings`, and `fire_points`. `readings` has a unique `(node_id, seq)` constraint to avoid duplicate weather inserts. | Applied to a local PostGIS 3.7 database. |
+| `.env.example` | Documents MQTT and database configuration; `.env` is intentionally ignored by Git. | Used for local and Pi configuration. |
+| `simulator.py` | Optional fake N1-N3 publisher for offline development only. | Used to verify both backend paths; stop it before testing real sensors. |
+| `run_live.ps1` | Windows helper for a laptop on FireNet. It checks `.env`, verifies `10.42.1.1:1883` is reachable, starts ingest/WebSocket in separate terminals, and opens the latest-message endpoint. | Added; requires FireNet and a real Pi broker. |
+| `reset_local_test_db.ps1` | Guarded reset of the local Docker test tables only. | Added to remove existing simulator rows before a live-data test. |
+| `run_live.sh` | Pi/Linux launcher. Starts `ingest.py` and `ws_server.py` together and stops both cleanly on Ctrl+C. | Added for deployment after `uv sync` and `.env` setup. |
+
+Local Docker development services: `fireguard-mqtt` exposes Mosquitto at `127.0.0.1:1883`; `fireguard-postgis` exposes PostGIS at `127.0.0.1:5433` (container port remains 5432). The host port 5433 was selected because Windows would not allow a 5432 binding. These containers are local test infrastructure, not the Pi deployment.
+
+**Real-data test status:** not yet confirmed end-to-end from the Pi broker. A laptop on FireNet must set `MQTT_HOST=10.42.1.1`, stop `simulator.py`, restart `ingest.py` and `ws_server.py`, and confirm incoming W1/N1/N2/N3 rows. On the Pi itself, use `MQTT_HOST=127.0.0.1` because Mosquitto is local.
+
+`simulator.py` now adds `"_simulated": true` to its messages. The two services ignore marked simulator messages by default (`ALLOW_SIMULATOR_DATA=false`), so a live run will not pollute the dashboard cache or database. Set `ALLOW_SIMULATOR_DATA=true` only for intentional offline simulator testing. This marker is specific to the project simulator; real sensor messages remain unchanged.
 
 ### 1.3 Node N1: La Crosse TX145WSDTHv3 over SDR (working)
 We could not get an anemometer + vane for the ESP32, so we use the outdoor unit of a **La Crosse S81120v2** station (model **TX145WSDTHv3**, FCC ID OMOTX145WSDTHv3, 433 MHz, 3×AA + solar). It sends wind speed, wind direction, temperature and humidity, so it is a complete weather node by itself.
@@ -329,6 +350,21 @@ Why: skipping a silent node lets the margin stay green on old data, the same fai
 - `dem`, `slope`, `aspect`, `fuel` raster tables (EPSG:32612)
 - `safety_zones(id, geom, radius_m)`; the radius is checked against 4 × flame height
 
+### 6.1 Implemented MVP schema (local; deploy unchanged to Pi after review)
+
+`schema.sql` now defines the following initial columns. This does not replace the planned routing/static-data tables above; it is the live sensor-ingestion foundation.
+
+- `nodes(id TEXT PRIMARY KEY, label, x_cm, y_cm, geom geometry(Point,32612), last_seen)`. The `geom` field is reserved and remains NULL until the tabletop-to-UTM transform is agreed.
+- `readings(id, node_id, seq, temp_c, rh, wind_ms, wind_dir, flame, batt, received_at, raw JSONB)`. `received_at` is the database receipt time. `(node_id, seq)` is unique, making the current weather message insert idempotent across reconnects.
+- `fire_points(id, source, x_cm, y_cm, confidence, geom geometry(Point,32612), received_at, raw JSONB)`. The table exists but `ingest.py` deliberately does not persist fire events yet.
+
+Apply on the Pi after setting `DATABASE_URL` in `.env`:
+
+```bash
+set -a; . ./.env; set +a
+psql "$DATABASE_URL" -f schema.sql
+```
+
 ---
 
 ## 7. Checks to keep (one runnable file each, asserts only)
@@ -417,24 +453,26 @@ cd ~/fire && uv run python simulator.py --wind-shift-after 30 --silent-after 60
 Verified: seq 0–2 calm at 270°, ~2 m/s; seq 3 (t = 30 s) 180°, ~7.5 m/s, temp up, RH down; N3 stops after 60 s. For local dev, install Mosquitto on your laptop and run the same script; topics and format are identical.
 
 ### 8.5 WebSocket server → dashboard contract
-`ws_server.py` (FastAPI) subscribes to `sensors/#` and `engine/#` and pushes every message to the dashboard. Skeleton in Appendix B. Each WebSocket message:
+`ws_server.py` (FastAPI) subscribes to `sensors/#`, `engine/#`, and `crew/#` and pushes every message to the dashboard. The implementation is now in the repository root; the Appendix B code is retained as the original reference. Each WebSocket message:
 ```json
 {"topic": "sensors/N1/wx", "rx_ts": 1762554000.12, "data": {"type": "wx", "node": "N1", "seq": 4, "temp_c": 30.8, "rh": 16.2, "wind_ms": 2.1, "wind_dir": 270, "flame": 0, "batt": 90}}
 ```
 `rx_ts` = server receive time (Unix s). On connect, the server first sends the latest message per topic, so a reloaded dashboard isn't empty.
-Run: `uv add fastapi "uvicorn[standard]" paho-mqtt` then `uv run uvicorn ws_server:app --host 0.0.0.0 --port 8000`.
+Run: `uv sync` then `uv run uvicorn ws_server:app --host 0.0.0.0 --port 8000`.
 Test in a browser console: `const ws = new WebSocket("ws://localhost:8000/ws"); ws.onmessage = e => console.log(JSON.parse(e.data));`
 On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws://10.42.0.1:8000/ws` (cable).
+`http://127.0.0.1:8000/api/sensors/latest` is an HTTP inspection endpoint, not the WebSocket itself. Navigating to `ws://.../ws` in a browser address bar is not a valid WebSocket test.
 
 ---
 
 ## 9. Next steps, open questions, gotchas
 
 **Next steps**
-- [ ] Vivek: PostGIS database `fire` (`nodes`, `readings`) + `ingest.py` (MQTT → database)
-- [ ] Teammate: `ws_server.py` working locally against the simulator
 - [x] ESP32-S3 node: on FireNet, publishing heartbeats (as `N2`, verified Sat Nov 7)
 - [ ] N1 (La Crosse): fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
+- [x] Local PostGIS schema + `ingest.py` (MQTT → database) implemented and verified with simulator data
+- [x] `ws_server.py` working locally against the simulator; latest-message HTTP cache verified
+- [ ] Deploy the committed schema, `ingest.py`, and `ws_server.py` to the Pi; verify real MQTT messages reach both the database and WebSocket dashboard
 - [ ] Staleness monitor (fresh / aging / stale from `last_seen`) + worst-case values (§5.3)
 - [ ] Decide the tabletop ↔ UTM transform (§1.4)
 - [ ] Trail graph for the tabletop in PostGIS + pgRouting, then the margin engine
