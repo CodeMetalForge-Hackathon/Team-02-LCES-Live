@@ -5,9 +5,9 @@
 #include <DHT.h>
 
 // ---- edit these ----
-const char* WIFI_SSID  = "lces";
-const char* WIFI_PASS  = "lces1234";
-const char* MQTT_HOST  = "10.42.0.1";  // Pi's IP; 10.42.0.1 when the Pi runs the hotspot
+const char* WIFI_SSID  = "FireNet";
+const char* WIFI_PASS  = "firenet123";
+const char* MQTT_HOST  = "10.42.1.1";  // Pi's IP on the FireNet hotspot
 const char* NODE_ID    = "N1";
 const uint32_t PUBLISH_MS = 10000;     // Pi greys a node after 30 s = 3 missed publishes
 // --------------------

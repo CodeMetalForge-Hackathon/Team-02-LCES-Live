@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../microController"
+		},
+		{
+			"name": "code-metal",
+			"path": "../../../../../PlatformIO/Projects/code-metal"
+		},
+		{
+			"name": "weather-node",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
