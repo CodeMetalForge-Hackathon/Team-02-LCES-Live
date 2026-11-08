@@ -27,8 +27,8 @@ Core question the system answers, continuously:
 | PostGIS database + ingest | **Real node data ingested and verified** (Nov 7) | Teammate | Re-apply `schema.sql` (drops the seq constraint) |
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
-| Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
-| Margin engine (`engine.py`) | **v1 working, testing only (§5.6):** pyrothermel spread from each spot fire, Tobler crew times on fixed routes, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass (`test_margin.py`). Since Nov 8 on the real `nodes.json` and graph-exported `routes.geojson` (`ranch`, `black`). Can't run the demo story (no fire from the black). **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek + Person A | Fire spread from the black (§2.4); engine routes over `graph.npz` (§9 track 8); build pyrothermel on the Pi |
+| Dashboard (MapLibre) | **Implemented locally and build verified**; consumes WebSocket sensor and engine-state messages | Teammate | Replace temporary map-route geometry with final route GeoJSON; deploy to Pi |
+| Margin engine (`engine.py`) | **v1 working (§5.6):** pyrothermel spread, Tobler crew times, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass. Uses real `nodes.json` and graph-exported ranch/black routes, but cannot yet run the black-fire demo story. **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek + Person A | Fire spread from the black (§2.4); engine routes over `graph.npz` (§9 track 8); build pyrothermel on the Pi |
 | Flame sensor, LoRa link, thermal lookout, crew tag | **Cut (Nov 8)** | — | — |
 | Node placement (fake GPS per node, §1.4) | **Decided Nov 8:** N1 on the ridge near the saddle, N2 in the box canyon, N3 between canyon and ranch | TBD | Pick exact lat/lon on the map |
 
@@ -89,7 +89,7 @@ The MQTT-to-dashboard and MQTT-to-database MVP is implemented in the repository 
 
 | File | Purpose | Local verification completed |
 |---|---|---|
-| `ws_server.py` | FastAPI service. Subscribes to `sensors/#`, `engine/#`, and `crew/#`; wraps each MQTT JSON payload in `{topic, rx_ts, data}`; broadcasts it to `/ws`; exposes the latest per-topic cache at `/api/sensors/latest`. | Uvicorn started successfully; MQTT connection and `/api/sensors/latest` cache verified with simulator messages. |
+| `ws_server.py` | FastAPI service. Subscribes to `sensors/#`, `engine/#`, and `crew/#`; wraps each MQTT JSON payload in `{topic, rx_ts, data}`; broadcasts it to `/ws`; exposes the latest per-topic cache at `/api/sensors/latest`; serves the built dashboard at `/` when `dashboard/dist` exists. | Uvicorn started successfully; MQTT connection and `/api/sensors/latest` cache verified with simulator messages; dashboard root and API returned HTTP 200 locally. |
 | `ingest.py` | Subscribes to `sensors/+/wx`, validates weather messages, converts missing `-1`/`-99` values to SQL `NULL`, upserts `nodes.last_seen`, and inserts readings. | Simulator messages were persisted and queried from PostgreSQL. |
 | `schema.sql` | Creates the PostGIS extension plus `nodes`, `readings`, and `fire_points`. `readings` has a unique `(node_id, seq)` constraint to avoid duplicate weather inserts. | Applied to a local PostGIS 3.7 database. |
 | `.env.example` | Documents MQTT and database configuration; `.env` is intentionally ignored by Git. | Used for local and Pi configuration. |
@@ -758,6 +758,20 @@ Run: `uv sync` then `uv run uvicorn ws_server:app --host 0.0.0.0 --port 8000`.
 Test in a browser console: `const ws = new WebSocket("ws://localhost:8000/ws"); ws.onmessage = e => console.log(JSON.parse(e.data));`
 On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws://10.42.0.1:8000/ws` (cable).
 `http://127.0.0.1:8000/api/sensors/latest` is an HTTP inspection endpoint, not the WebSocket itself. Navigating to `ws://.../ws` in a browser address bar is not a valid WebSocket test.
+
+### 8.6 Dashboard deployment
+
+The React/MapLibre dashboard lives in `dashboard/`. It renders the local Yarnell hillshade, perimeter and site data, live sensor cards, placeholder R1/R2 routes, route state, alerts and a leave-by time. It uses `ws://<current-host>:8000/ws` by default, so it works unchanged in local development and when opened from the Pi on FireNet.
+
+Before starting `ws_server.py` on the Pi, build the frontend once:
+
+```bash
+cd ~/fire/dashboard
+npm install
+npm run build
+```
+
+`ws_server.py` serves the generated `dashboard/dist` at `http://10.42.1.1:8000`; the same service provides the WebSocket at `/ws`. Do not commit `dashboard/dist`; build it on the Pi after `git pull`.
 
 ---
 

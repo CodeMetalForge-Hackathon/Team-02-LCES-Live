@@ -8,6 +8,8 @@ __pycache__/
 .env
 # Node
 node_modules/
+dashboard/dist/
+*.tsbuildinfo
 # Large downloads: keep out of git
 docs/*.tif
 docs/*.pdf

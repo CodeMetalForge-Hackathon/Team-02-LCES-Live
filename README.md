@@ -110,6 +110,17 @@ set -a; . ./.env; set +a
 psql "$DATABASE_URL" -f schema.sql
 ```
 
+Build the dashboard once while the Pi has internet. The built files are served
+by `ws_server.py` on port 8000, so Vite does not run during the demo:
+
+```bash
+sudo apt update
+sudo apt install -y nodejs npm
+cd /home/thunder/fire/dashboard
+npm install
+npm run build
+```
+
 Start both live services together (press `Ctrl+C` to stop both):
 
 ```bash
@@ -117,7 +128,20 @@ cd /home/thunder/fire
 bash run_live.sh
 ```
 
+If the Pi only has FireNet and cannot reach the internet, deploy from a laptop
+that already has this repository and dependencies with the PowerShell helper:
+
+```powershell
+.\deploy_pi.ps1
+```
+
+It builds the dashboard locally, copies the application and data to the Pi over
+SSH, preserves the Pi-only `.env`, applies `schema.sql`, and starts the live
+services. The Pi must have had `uv sync --group engine` run while it had internet
+access; the helper deliberately uses `uv sync --offline` on FireNet.
+
 Or, for separate logs/terminals, run `uv run python ingest.py` and `uv run
 uvicorn ws_server:app --host 0.0.0.0 --port 8000` individually.
 
-The dashboard connects to `ws://10.42.1.1:8000/ws` while on FireNet.
+Open `http://10.42.1.1:8000` while on FireNet. The dashboard connects to
+`ws://10.42.1.1:8000/ws` automatically.

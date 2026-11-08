@@ -5,10 +5,12 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -104,3 +106,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         pass
     finally:
         clients.discard(websocket)
+
+
+# When dashboard/dist exists (after `npm run build`), expose it at `/`.
+# API and WebSocket routes above are registered first and remain available.
+dashboard_dist = Path(__file__).parent / "dashboard" / "dist"
+if dashboard_dist.is_dir():
+    app.mount("/", StaticFiles(directory=dashboard_dist, html=True), name="dashboard")
