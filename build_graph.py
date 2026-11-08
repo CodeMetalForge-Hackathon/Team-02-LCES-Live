@@ -20,8 +20,10 @@ YARNELL = DATA / "yarnell"
 LANDFIRE = next(DATA.glob("landfire_*/"), None)
 
 RES = 10.0                      # m
-CROP_CENTRE = (34.222858, -112.78056)  # lat, lon: takes in lunch spot, anchor point, the black edge, ranch
-CROP_CELLS = 200                # 2 km x 2 km
+# Fire / routing grid, UTM 12N (x0, ybot, xmax, ytop): lunch spot, anchor point, ranch, and the 2013 black up to
+# the top of dem.tif, so the fire area shows (and spreads) over the upper map too. Was a 2 km square
+# (x 334990-336990, y 3787300-3789300) until Nov 8 ~08:30.
+CROP_BOUNDS = (334640.0, 3787300.0, 337990.0, 3790520.0)    # 335 x 322 cells
 MAX_SLOPE_DEG = 38
 TRAIL_STEP_M = 25
 RANCH = (34.21952, -112.77091)  # SAIT Fig. 7; see data/yarnell/scenario.geojson
@@ -171,13 +173,14 @@ def build_yarnell():
 
     with rasterio.open(YARNELL / "dem.tif") as s:
         T = s.transform
-        cx, cy = utm(*CROP_CENTRE)
-        c0 = round((cx - T.c) / RES) - CROP_CELLS // 2
-        r0 = round((T.f - cy) / RES) - CROP_CELLS // 2
-        win = ((r0, r0 + CROP_CELLS), (c0, c0 + CROP_CELLS))
+        bx0, bybot, bxmax, bytop = CROP_BOUNDS
+        c0, r0 = round((bx0 - T.c) / RES), round((T.f - bytop) / RES)
+        nr, nc = round((bytop - bybot) / RES), round((bxmax - bx0) / RES)
+        assert c0 >= 0 and r0 >= 0 and r0 + nr <= s.height and c0 + nc <= s.width, "CROP_BOUNDS outside dem.tif"
+        win = ((r0, r0 + nr), (c0, c0 + nc))
         x0, ytop = T.c + c0 * RES, T.f - r0 * RES
     crop_t = from_origin(x0, ytop, RES, RES)
-    shape = (CROP_CELLS, CROP_CELLS)
+    shape = (nr, nc)
 
     def read(name):
         with rasterio.open(YARNELL / name) as s:
@@ -210,7 +213,7 @@ def build_yarnell():
         fuel = np.where(inside, SH5, fuel)
 
     trails = []
-    xmax, ybot = x0 + CROP_CELLS * RES, ytop - CROP_CELLS * RES
+    xmax, ybot = x0 + nc * RES, ytop - nr * RES
     for f in osm:
         if REPLAY_2013 and p(f, "highway") == "footway":
             continue  # Hotshot Journey Trail (2016) runs down the 2013 descent line
@@ -228,7 +231,7 @@ def build_yarnell():
 
     g = build(elev, slope, veg, blocked, trails, x0, ytop)
     rx, ry = utm(*RANCH)
-    n = CROP_CELLS * CROP_CELLS
+    n = nr * nc
     g["ranch"] = np.flatnonzero(np.hypot(g["x"][:n] - rx, g["y"][:n] - ry) <= RANCH_RADIUS_M)
     sc = {f["properties"]["name"]: f for f in json.loads((YARNELL / "scenario.geojson").read_text())["features"]}
     # Scenario start (16:20): the fire area at 16:15 has all burned > 5 min ago, so it is the black.

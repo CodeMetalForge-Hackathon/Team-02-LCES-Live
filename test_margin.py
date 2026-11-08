@@ -5,7 +5,9 @@ Run:  uv run --group engine python test_margin.py      (or: uv run --group engin
 Uses the real Yarnell rasters and the placeholder nodes/routes in data/yarnell/placeholder/;
 the graph checks use data/yarnell/graph.npz (build_graph.py) and the real nodes.json.
 """
+import base64
 import json
+import zlib
 import math
 import tempfile
 from pathlib import Path
@@ -31,7 +33,17 @@ def routes():
 
 
 def engine():
-    return MarginEngine(TERRAIN, routes(), load_nodes(NODES_FILE), placeholder=True)
+    eng = MarginEngine(TERRAIN, routes(), load_nodes(NODES_FILE), placeholder=True)
+    eng.on_cmd({"cmd": "start"}, 0)
+    return eng
+
+
+def graph_engine(start_at=0.0):
+    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, crew_start_xy()), load_nodes(config.NODES_FILE),
+                       graph=GRAPH)
+    if start_at is not None:
+        eng.on_cmd({"cmd": "start"}, start_at)
+    return eng
 
 
 def feed(eng, now, wind_ms, wind_dir, skip=()):
@@ -135,12 +147,13 @@ def test_wind_shift_turns_r1_red_and_reroutes_to_r2():
     eng.on_cmd({"cmd": "fire", "node": "N2"}, 0)
     s = eng.compute(0)
     assert route_by_id(s, "R1")["status"] == "green" and s["active_route"] == "R1"
-    feed(eng, 10, **SHIFT)
-    s = eng.compute(10)
+    for t in (10, 30, 50, 70):                                # wind is smoothed (WIND_SMOOTH_S): hold the shift
+        feed(eng, t, **SHIFT)
+    s = eng.compute(70)
     assert route_by_id(s, "R1")["status"] == "red"
     assert s["active_route"] == "R2" and route_by_id(s, "R2")["status"] != "red"
     assert any(a.startswith("REROUTED: R1 -> R2") for a in s["alerts"])
-    assert s["leave_by_ts"] is not None and s["leave_by_ts"] > 10
+    assert s["leave_by_ts"] is not None and s["leave_by_ts"] > 70
 
 
 def test_stale_node_goes_grey_and_shrinks_the_margin():
@@ -162,6 +175,15 @@ def test_stale_node_goes_grey_and_shrinks_the_margin():
         assert s["active_route"] == "R1"
         assert not any(a.startswith("REROUTED") for a in s["alerts"])
         assert any(a.startswith("NO SAFE ROUTE") for a in s["alerts"])
+
+
+def test_n1_gets_a_longer_stale_threshold():
+    # N1 (SDR wind) sends every ~30 s: one missed packet = aging, not stale; other nodes keep STALE_S.
+    eng = engine()
+    feed(eng, 0, **CALM)
+    h = eng.node_health(45)
+    assert h["N1"][0] == "aging" and h["N2"][0] == "stale"
+    assert eng.node_health(config.health_s("N1")[1])["N1"][0] == "stale"
 
 
 def test_reset_clears_fires():
@@ -286,8 +308,7 @@ def test_fire_cell_burns_for_5_min_then_black_and_flame_buffer_is_unsafe_first()
 
 
 def test_graph_engine_spreads_from_the_black_and_ignites_spot_fires():
-    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, crew_start_xy()), load_nodes(config.NODES_FILE),
-                       graph=GRAPH)
+    eng = graph_engine()
     feed(eng, 0, **CALM)
     eng.compute(0)
     reached0 = np.isfinite(eng.fire.arrival).sum()
@@ -298,10 +319,15 @@ def test_graph_engine_spreads_from_the_black_and_ignites_spot_fires():
     assert eng.fire.arrival[build_graph.cell(GRAPH, n2["x"], n2["y"])] == 60
     assert eng.fire.burnable[np.isfinite(eng.fire.arrival)].all()          # non-burnable never burns
     json.dumps(s, allow_nan=False)
-    assert s["areas"]["black"]["coordinates"] and s["areas"]["burning"]["coordinates"]   # map layers (§5.5)
+    fg = s["fire_grid"]                                                    # map layer: arrival per cell
+    q = np.frombuffer(zlib.decompress(base64.b64decode(fg["data"])), "<u2").reshape(fg["rows"], fg["cols"])
+    assert (q == 0).sum() == eng.fire.black0.sum() and ((q > 0) & (q < 65535)).any() and len(fg["corners"]) == 4
     eng.on_cmd({"cmd": "reset"}, 61)
     eng.compute(61)
-    assert eng.fire.arrival[build_graph.cell(GRAPH, n2["x"], n2["y"])] > 61   # reset: the black at start again
+    assert eng.fire is None and not eng.fires                                # reset: back to ready
+    eng.on_cmd({"cmd": "start"}, 62)
+    eng.compute(62)
+    assert eng.fire.arrival[build_graph.cell(GRAPH, n2["x"], n2["y"])] > 62   # the black at start again
 
 
 # ---- closures + reroute loop (§5 steps 3-7) ------------------------------------------------
@@ -346,8 +372,7 @@ def test_no_path_left_keeps_the_route_red_and_the_black_grows():
 def test_graph_2013_story_ssw_green_then_nne_outflow_no_safe_route():
     """Demo on the 2013 data (spec story): wind from the SSW -> both routes green; the outflow from the
     NNE drives the front north of the crew south onto them -> both red, "no safe route"."""
-    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, crew_start_xy()), load_nodes(config.NODES_FILE),
-                       graph=GRAPH)
+    eng = graph_engine()
     feed(eng, 0, wind_ms=2.5, wind_dir=200)
     s = eng.compute(0)
     assert all(r["status"] == "green" for r in s["routes"]), s["routes"]
@@ -355,6 +380,124 @@ def test_graph_2013_story_ssw_green_then_nne_outflow_no_safe_route():
     s = eng.compute(60)
     assert all(r["status"] == "red" for r in s["routes"]), s["routes"]
     assert any(a.startswith("NO SAFE ROUTE") for a in s["alerts"])
+
+
+
+# ---- ready phase, Start, initial plan + reroute (docs/specs/demo-dashboard, tickets 01-03) -------
+def test_ready_phase_no_fire_until_start_then_reset_back_to_ready():
+    eng = graph_engine(start_at=None)
+    feed(eng, 0, **CALM)
+    s = eng.compute(0)
+    assert s["phase"] == "ready" and s["started_ts"] is None and s["scenario_start"] == "16:20"
+    assert s["fire_grid"] is None and eng.fire is None
+    assert all(r["margin_min"] is None and r["status"] == "green" for r in s["routes"])
+    assert all(all(v is None for v in r["t_fire_min"]) for r in s["routes"])
+    assert s["active_route"] == "black" and s["replan_ts"] is None
+    eng.on_cmd({"cmd": "fire", "node": "N2"}, 5)                # ignored before Start
+    assert not eng.fires
+    feed(eng, 100, **CALM)
+    s = eng.compute(100)                                        # time passing in ready moves nothing
+    assert s["fire_grid"] is None and s["phase"] == "ready"
+    eng.on_cmd({"cmd": "start"}, 120)
+    s = eng.compute(120)
+    assert s["phase"] == "running" and s["started_ts"] == 120 and s["replan_ts"] == 120
+    assert s["fire_grid"]["t0"] == 120
+    assert all(isinstance(r["margin_min"], float) for r in s["routes"]), s["routes"]
+    grid = eng.fire
+    eng.on_cmd({"cmd": "start"}, 130)                           # second start ignored
+    assert eng.started_ts == 120 and eng.fire is grid
+    eng.on_cmd({"cmd": "reset"}, 140)
+    s = eng.compute(140)
+    assert s["phase"] == "ready" and s["fire_grid"] is None and s["started_ts"] is None
+    assert all(r["margin_min"] is None for r in s["routes"]) and s["active_route"] == "black"
+    json.dumps(s, allow_nan=False)
+
+
+def test_graph_2013_story_starts_on_the_black_and_keeps_it():
+    """At Start the crew takes the fastest route that isn't red (the black, 18.8 vs 28.1 min) and keeps it:
+    the outflow from the WNW-NW (300 deg) cuts the ranch route, but the black stays green -> no reroute."""
+    eng = graph_engine()
+    feed(eng, 0, wind_ms=2.5, wind_dir=200)
+    s = eng.compute(0)
+    assert all(r["status"] == "green" for r in s["routes"]), s["routes"]
+    assert s["active_route"] == "black" and s["replan_ts"] == 0
+    for t in (60, 120, 180):
+        feed(eng, t, wind_ms=7.5, wind_dir=300)
+        s = eng.compute(t)
+        assert s["active_route"] == "black" and route_by_id(s, "black")["status"] != "red", s["routes"]
+    assert route_by_id(s, "ranch")["status"] == "red"
+    assert not any(a.startswith("REROUTED") for a in s["alerts"]) and s["replan_ts"] == 0
+
+
+def test_graph_black_cut_reroutes_to_the_ranch():
+    """Wind from the east (90 deg, 4 m/s) drives the fire onto the route back to the black -> REROUTED to the ranch."""
+    eng = graph_engine()
+    feed(eng, 0, wind_ms=2.5, wind_dir=200)
+    assert eng.compute(0)["active_route"] == "black"
+    feed(eng, 60, wind_ms=4.0, wind_dir=90)
+    s = eng.compute(60)
+    assert route_by_id(s, "black")["status"] == "red" and route_by_id(s, "ranch")["status"] == "green", s["routes"]
+    assert any(a.startswith("REROUTED: black -> ranch") for a in s["alerts"])
+    assert s["active_route"] == "ranch" and s["replan_ts"] == 60
+    feed(eng, 120, wind_ms=2.5, wind_dir=200)                    # wind back: no flip back to the faster black
+    assert eng.compute(120)["active_route"] == "ranch"
+
+
+def test_per_point_times_align_with_path_and_give_the_margin():
+    eng = graph_engine()
+    feed(eng, 0, wind_ms=2.5, wind_dir=200)
+    eng.compute(0)
+    feed(eng, 60, wind_ms=7.5, wind_dir=300)
+    s = eng.compute(60)
+    for r in s["routes"]:
+        tc, tf = r["t_crew_min"], r["t_fire_min"]
+        assert len(tc) == len(tf) == len(r["path"]), r["id"]
+        diffs = [f - c for c, f in zip(tc, tf) if c is not None and f is not None]
+        if r["margin_min"] is None:
+            assert not diffs
+        else:
+            assert abs(min(diffs) - r["margin_min"]) <= 0.15, (r["id"], min(diffs), r["margin_min"])
+        assert tc[-1] is not None and abs(tc[-1] - r["eta_min"]) <= 0.1
+
+
+
+# ---- wind smoothing + crew walk (Nov 8 dashboard round 2) ---------------------------------
+def test_wind_direction_is_smoothed_as_a_vector():
+    eng = graph_engine()
+    for t, d in ((0, 350), (2, 10), (4, 350), (6, 10)):          # jumps across north
+        eng.on_wx({"type": "wx", "node": "N1", "wind_ms": 4.0, "wind_dir": d, "temp_c": 30, "rh": 15}, t)
+    w, d = eng.smoothed_wind("N1")
+    assert d in (0, 355, 5) and w == 4.0, (w, d)                 # not 180
+    for t in range(8, 200, 2):                                    # a steady new direction wins within a minute or so
+        eng.on_wx({"type": "wx", "node": "N1", "wind_ms": 7.3, "wind_dir": 300, "temp_c": 30, "rh": 15}, t)
+    assert eng.smoothed_wind("N1") == (7.5, 300)                  # speed rounded up to 0.5 m/s
+    eng2 = graph_engine()
+    eng2.on_wx({"type": "wx", "node": "N1", "wind_ms": 4.0, "wind_dir": 200, "temp_c": 30, "rh": 15}, 0)
+    eng2.on_wx({"type": "wx", "node": "N1", "wind_ms": 4.0, "wind_dir": 300, "temp_c": 30, "rh": 15}, 2)
+    assert 200 < eng2.smoothed_wind("N1")[1] < 230                # one jumpy reading only moves it a little
+
+
+def test_crew_walks_the_active_route_after_start_and_stops_on_real_positions():
+    eng = graph_engine(start_at=None)
+    feed(eng, 0, wind_ms=2.5, wind_dir=200)
+    s0 = eng.compute(0)
+    eng.compute(30)
+    assert eng.crew_xy == eng.start_xy                            # ready: nobody moves
+    eng.on_cmd({"cmd": "start"}, 40)
+    feed(eng, 40, wind_ms=2.5, wind_dir=200)
+    s1 = eng.compute(40)
+    feed(eng, 100, wind_ms=2.5, wind_dir=200)
+    s2 = eng.compute(100)
+    moved = math.hypot(eng.crew_xy[0] - eng.start_xy[0], eng.crew_xy[1] - eng.start_xy[1])
+    assert 10 < moved < 150, moved
+    eta1, eta2 = route_by_id(s1, "black")["eta_min"], route_by_id(s2, "black")["eta_min"]
+    assert 0.5 < eta1 - eta2 < 1.6, (eta1, eta2)                  # ~1 min of walking done in 1 min
+    assert s2["crew"]["walking"] and s0["crew"]["walking"] is False
+    eng.on_crew(dict(zip(("lon", "lat"), to_lonlat(*eng.start_xy))), 101)   # real GPS: walk stops
+    eng.compute(160)
+    assert math.hypot(eng.crew_xy[0] - eng.start_xy[0], eng.crew_xy[1] - eng.start_xy[1]) < 0.01
+    eng.on_cmd({"cmd": "reset"}, 170)
+    assert not eng.crew_external
 
 
 if __name__ == "__main__":

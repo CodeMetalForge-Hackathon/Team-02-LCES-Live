@@ -20,6 +20,7 @@ RASTERS = {name: DATA / f"{name}.tif" for name in ("dem", "slope", "aspect", "fu
 # "2013": replay with SH5 (old chaparral) everywhere (§3.1 fuel decision, §1.4 fallback).
 # "today": LANDFIRE LF2025 fuel.tif as is.
 SCENARIO = "2013"
+SCENARIO_START = "16:20"     # scenario clock at Start ({"cmd": "start"}); shown as 16:20 + elapsed
 REPLAY_FUEL = 145            # SH5
 NON_BURNABLE = range(91, 100)  # FBFM40 91-99: no spread
 
@@ -60,11 +61,30 @@ LEAVE_BUFFER_MIN = 2.0       # leave-by = now + margin - buffer (§5 step 7)
 HEARTBEAT_S = 10
 AGING_S = 20                 # 2 missed heartbeats -> aging
 STALE_S = 30                 # 3 missed heartbeats -> stale (grey)
+# Per-node overrides (aging_s, stale_s). N1 (La Crosse wind via SDR) transmits only every ~30 s, so it gets
+# about 2 intervals + jitter before it goes stale; one lost packet makes it aging, not stale.
+NODE_HEALTH_S = {"N1": (40, 65)}
+
+
+def health_s(node: str) -> tuple[float, float]:
+    """(aging_s, stale_s) for a node."""
+    return NODE_HEALTH_S.get(node, (AGING_S, STALE_S))
 WORST_WIND_MS = 10.0         # PLACEHOLDER (§5.3 open question)
 WORST_TEMP_C = 38.0          # PLACEHOLDER
 WORST_RH = 8.0               # PLACEHOLDER
 
+# ---- Wind smoothing (N1 readings jump around) ---------------------------------
+WIND_SMOOTH_S = 20.0         # time constant of the moving average (wind direction averaged as a vector)
+WIND_DIR_STEP_DEG = 5        # smoothed direction rounded to this, so tiny wobbles don't re-run the fire grid
+WIND_SPEED_STEP_MS = 0.5     # smoothed speed rounded UP to this (conservative)
+
+# ---- Simulated crew (escape-margin spec story 35) -----------------------------
+CREW_WALK = True             # after Start the crew walks the active route at the modelled speed (graph mode),
+                             # until a real crew/<id>/pos message arrives
+
 # ---- Engine loop ------------------------------------------------------------
+FIRE_GRID_UNIT_S = 0.25     # engine/state fire_grid: arrival times in steps of this (uint16: ~4.5 h of scenario)
+FIRE_GRID_HORIZON_S = 900   # ... sent for cells the fire reaches within this many seconds (dashboard draws 0-10 min)
 RECOMPUTE_S = 1.0            # recompute + publish engine/state this often
 ALERT_HOLD_S = 30            # event alerts (e.g. "rerouted") stay in engine/state this long
 STATE_TOPIC = "engine/state"

@@ -13,7 +13,7 @@ Core question the system answers, continuously:
 
 ---
 
-## 0. Status (Sat Nov 7, evening)
+## 0. Status (Sat Nov 7, evening; engine / dashboard rows updated Sun Nov 8, ~06:50)
 
 | Area | Status | Owner | Next step |
 |---|---|---|---|
@@ -27,8 +27,8 @@ Core question the system answers, continuously:
 | PostGIS database + ingest | **Real node data ingested and verified** (Nov 7) | Teammate | Re-apply `schema.sql` (drops the seq constraint) |
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
-| Dashboard (MapLibre) | **Implemented locally and build verified**; consumes WebSocket sensor and engine-state messages | Teammate | Replace temporary map-route geometry with final route GeoJSON; deploy to Pi |
-| Margin engine (`engine.py`) | **v1 working (§5.6):** pyrothermel spread, Tobler crew times, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass. Uses real `nodes.json` and graph-exported ranch/black routes, but cannot yet run the black-fire demo story. **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek + Person A | Fire spread from the black (§2.4); engine routes over `graph.npz` (§9 track 8); build pyrothermel on the Pi |
+| Dashboard (MapLibre) | **Demo layout (Nov 8, §5.7):** Start / Reset / scenario clock, one Active-route tile, wind + fire-spread arrow, compass, legend, place labels, route and sensor hover popups; served by `ws_server.py` on the Pi (first round deployed ~06:15) | Glenn + Vivek | Coloured terrain / fuel backdrop (demo-dashboard tickets 07–08), route animation (11) |
+| Margin engine (`engine.py`) | **v2 working on the 2013 data (Nov 8):** fire spread from the black (§2.4), closures + reroute loop (§5.4), `areas`, ready / Start phases, smoothed wind, simulated crew walk (§5.6, §5.7); 30 checks pass; pyrothermel built on the Pi, first round deployed there ~06:15 | Vivek + Yugesh | Hot-sensor rule, `WIND_SCALE`, N1 fan test (§9) |
 | Flame sensor, LoRa link, thermal lookout, crew tag | **Cut (Nov 8)** | — | — |
 | Node placement (fake GPS per node, §1.4) | **Decided Nov 8:** N1 on the ridge near the saddle, N2 in the box canyon, N3 between canyon and ranch | TBD | Pick exact lat/lon on the map |
 
@@ -428,18 +428,20 @@ So a 400 m shortcut through old chaparral costs about as much time as 4 km of tr
 ## 5. Margin engine (design settled Nov 8)
 
 Every recompute (on each incoming message, and at least every 5 s):
-1. Pull the latest reading per sensor node, the active fire points and the crew position. **A stale sensor node is not skipped: the engine uses worst-case values for it** (§5.3). Apply the hot-sensor-node rule (§1.4) to create fire points.
+1. Pull the latest reading per sensor node (wind as a ~20 s moving average, §5.7), the active fire points and the crew position. **A stale sensor node is not skipped: the engine uses worst-case values for it** (§5.3). Apply the hot-sensor-node rule (§1.4) to create fire points.
 2. **Fire:** advance the fire arrival times from the current fire front under current wind and moisture (§2.4). Classify cells: the black / burning / unburned.
 3. **Crew:** one Dijkstra from the crew to every cell, no closures: `t_crew(cell)`.
 4. `t_fire(cell) = (arrival − now) / safety_factor`.
 5. **Close** a cell if `t_fire < t_crew`, **or** it is burning, **or** it lies within 4 × flame length of a burning cell (60–80 ft flames ≈ 75–100 m). Drop the edges touching closed cells and run Dijkstra again.
 6. **Escape routes:** one per safety zone (ranch; any black cell). Margin of a route = `min over its cells (t_fire − t_crew)`; black cells count as unlimited. The safety zone's own cells are included.
 7. A detour reaches later cells later, so repeat 5–6 once or twice until the routes stop changing. **No path left → "no safe route" alert.**
-8. **Active route** = the escape route with the best margin. **Reroute** = the active route's path changes, or another safety zone's route becomes active.
+8. **Active route** = the fastest escape route that isn't red, picked once at Start; after that it changes only by a reroute (decided Nov 8, §5.7). **Reroute** = the active route turns red and another safety zone's route isn't (path changes within the same zone don't raise an alert yet).
 9. **Leave-by time** = `now + margin − buffer`, shown as a countdown.
 10. Publish `engine/state` (§5.5); `ws_server.py` forwards it to the dashboard.
 
-**Demo story (revised Nov 8, close to 2013):** scenario starts 16:20, crew at the saddle heading for the ranch, the black ~19 min behind them. Wind from the SSW (as until ~16:00) pushes the fire NE: both routes green. Fan on (the outflow; in 2013 the wind swung 180° to NNE within the hour) → the front north of the crew runs south → `ranch` red, then `black` red → "no safe route". No reroute: from the saddle the outflow cuts both. The simulated crew keeps walking the 2013 line (§1.4), so the margin keeps falling on the path the real crew took.
+**Demo story (current, decided Nov 8 ~06:05; details in §5.7 and `docs/specs/demo-dashboard/spec.md`):** ready screen → Start (16:20; the crew takes and walks the route back to the black) → fan on N1 from the SSW (both green) → fan to the WNW (~290–300°, ≥ 4 m/s) → the ranch route (where the 2013 crew went) turns red while the black route stays green → stop. NNE ("no safe route") for Q&A only.
+
+*Superseded story (Nov 8, before ~05:30):* scenario starts 16:20, crew at the saddle heading for the ranch, the black ~19 min behind them. Wind from the SSW (as until ~16:00) pushes the fire NE: both routes green. Fan on (the outflow; in 2013 the wind swung 180° to NNE within the hour) → the front north of the crew runs south → `ranch` red, then `black` red → "no safe route". No reroute: from the saddle the outflow cuts both. The simulated crew keeps walking the 2013 line (§1.4), so the margin keeps falling on the path the real crew took.
 
 ### 5.1 Thresholds (defaults, in `config.py`)
 | Status | Rule |
@@ -486,7 +488,9 @@ Like a road map with some roads closed today: the graph (`graph.npz`, §4.6) is 
  "alerts":["Rerouted: back to the black"],"leave_by_ts":1762600180}
 ```
 `areas` are GeoJSON (Multi)Polygons traced from the cell grid (`rasterio.features.shapes`; adds `rasterio` as a runtime dependency). The full 40k-cell grid is not sent.
-This is the **v2 target** format. What the v1 engine publishes today is in §5.6.
+
+**Update Nov 8 ~08:30 (ticket 16):** `areas` replaced by `fire_grid` (`margin.fire_grid_msg`): the fire arrival time per cell as base64(zlib(uint16)), 0 = the black at Start, k ≥ 1 = `t0 + (k − 1) × 0.25 s`, 65535 = not within 15 min; plus `cols`, `rows`, `t0` (= `started_ts`), `burnout_s`, `corners` (lon/lat tl, tr, br, bl). ~50 KB per message (`areas` was ~52 KB). The dashboard (`dashboard/src/fireLayer.ts`) upsamples it ×2 bilinearly and redraws black / burning / 0–5 / 5–10 min at 20 fps at the interpolated scenario time, on a MapLibre canvas source: the front moves smoothly between cells and between the 1 s updates. The routing / fire grid also grew from 200 × 200 to **335 × 322 cells** (`build_graph.CROP_BOUNDS`: x 334640–337990, y 3787300–3790520, up to the top of `dem.tif`), so the 2013 black and the live front cover the upper map. black0 46,854 cells (front0 5,402); descent point → black0 still 18.8 min; demo-story margins unchanged. Engine step ~130 ms on the laptop (was 40–60), ~730 ms on a weather change (was ~270).
+This is the **v2 target** format. What the v1 engine publishes today is in §5.6; fields added Nov 8 for the demo dashboard (`phase`, `started_ts`, `scenario_start`, `replan_ts`, per-point `t_crew_min` / `t_fire_min`, `crew.walking` / `arrived`) are in §5.7.
 
 ### 5.6 Implemented now: v1 engine (`engine.py`, Vivek, Sun Nov 8)
 Built before the Nov 8 v2 design (§2.4, §4.6, ADR 0001/0002) and runnable today, so the dashboard can be built against it. **Simplification:** no off-trail grid, no scipy/pgRouting graph, no PostGIS dependency. Each hand-drawn route in `routes.geojson` is evaluated on its own along its points (densified to 25 m); "rerouting" = switching the active route. The fire spreads in straight lines from each fire point (the original §2.4), not by minimum travel time.
@@ -561,15 +565,42 @@ Verified Sun Nov 8 with the placeholder data (local Mosquitto + simulator, ~30 m
 | Fire spread | Straight line from each fire point, no history | Minimum travel time on the grid with history (ADR 0002); starts from the black |
 | Safety zones | Placeholder A/B with `sz_radius_m` | Boulder Springs Ranch (100 m) and the black |
 | Fire trigger | `"flame": 1` in a `wx` message; 30 m merge | Hot-sensor rule (≥ 45 °C or +8 °C in 30 s); at most one fire point per sensor node |
-| Reset / ignite | `engine/cmd` | Dashboard buttons on `sensors/<src>/fire` (reset message format not yet defined) |
-| Wind | Highest wind across all nodes, unscaled | N1 only, × `WIND_SCALE` (4) |
+| Reset / ignite | `engine/cmd` | **Done Nov 8:** dashboard Start / Reset / Ignite at N2 → `POST /api/cmd` → `engine/cmd` (§5.7) |
+| Wind | Highest wind across all nodes, unscaled; **each node's wind smoothed (20 s moving average, Nov 8)** | N1 only, × `WIND_SCALE` (4) |
 | Moisture | Hottest / driest fresh node | Same, but a node with a fire point is excluded |
 | Stale → wind direction unknown | When any node is stale | Only when N1 is stale |
 | Aging | 2 missed heartbeats (20 s), fixed 10 s interval | 1 missed heartbeat at each node's own interval |
 | Worst case | `WORST_WIND_MS` 10, `WORST_TEMP_C` 38, `WORST_RH` 8 | 13 m/s, 40 °C, 8 % (§5.3) |
 | 2013 fuel | SH5 everywhere (burnable cells) | SH5 inside the 2013 perimeter only |
-| Crew | Fixed at the first route's start (or `engine/cmd` crew) | Scenario simulator walks the 2013 descent line from the saddle at 16:20 |
+| Crew | **Done Nov 8 (differently):** the engine walks the crew along the active route from Start; a real `crew/+/pos` stops it | Scenario simulator walks the 2013 descent line from the saddle at 16:20 (dropped: the crew follows the plan) |
 | `engine/state` | `path` per route (graph mode, Nov 8); no `areas`; fires have `age_s`; extra `weather`, `crew`, `worst`, `eta_min` | `path` per route, `areas` (black / burning / +5 / +10 min), fires with `ignition_ts` (§5.5) |
+
+### 5.7 Demo-dashboard update (Sun Nov 8, ~05:00–06:50; Vivek)
+Spec and tickets: `docs/specs/demo-dashboard/` (01–06, 09, 10, 13–15 resolved). Checks: `test_margin.py`, **30 pass**.
+
+**Engine**
+- **Phases.** The engine starts in `ready`: no `FireGrid`, routes planned without fire (margins `null`, green), fire inputs ignored, nobody moves. `engine/cmd {"cmd":"start"}` → `running`: the scenario clock (`config.SCENARIO_START` = 16:20) and the `FireGrid` start at that moment. `{"cmd":"reset"}` → `ready` (fires, history, events, crew position cleared). Replaces "the fire clock starts at the first sensor reading" (§8.6).
+- **Active route.** Picked once, at the first running step after Start: the fastest route that isn't red (the black on the 2013 data). It then changes only when it turns red and another route isn't (`REROUTED`). Fixes the old rule that re-picked the fastest route every step while there were no spot fires. A ranch-first variant (`INITIAL_ROUTE = "ranch"`) was tried and dropped the same morning.
+- **Wind smoothing.** N1's readings jump (fan gusts, vane). Per node, an exponential moving average with time constant `WIND_SMOOTH_S` = 20 s; direction averaged as a unit vector (350° and 10° → 0°); direction rounded to `WIND_DIR_STEP_DEG` = 5°, speed rounded up to 0.5 m/s. The fire model and `weather.wind_from` use the smoothed values. A sharp change takes ~30–40 s to show fully. Each 5° step still rebuilds the spread table (~250 ms on the laptop); raise the step to 10° if the Pi is slow.
+- **Crew walk** (spec story 35, done differently). After Start the crew moves along the **active route** at the modelled walking times (`seg_s`), projected onto the route polyline each step; routes are then re-planned from the new position, so ETA and margins update as the crew walks. ~1.1 m/s on the black route (~330 m in 5 min; the black is ~19 min away). A real `crew/<id>/pos` message stops the simulated walk until Reset. "Crew reached <zone>" on arrival. `CREW_WALK` in `config.py`.
+- **Command path.** `ws_server.py` `POST /api/cmd` (`start` / `reset` / `fire` only, else 400; 503 without MQTT) publishes the body to `engine/cmd`. No auth (closed FireNet). CORS open so the Vite dev server can call it.
+- **`engine/state` additions:** `phase` (`ready`/`running`), `started_ts`, `scenario_start` ("16:20"), `replan_ts` (Start or last reroute); per route `t_crew_min` / `t_fire_min` (minutes from `ts` per `path` point; `null` before the crew's join point or where the fire never arrives; `t_fire_min` includes the 1.5 safety factor; min of the difference = `margin_min`); `crew.walking`, `crew.arrived`. Adds ~1.5 KB to a ~60 KB message (`areas` is ~52 KB).
+
+**Results on the 2013 data** (from the descent point; 60 s of SSW 2.5 m/s, then the shift; margins 1 / 3 / 5 min after):
+
+| Wind from | ranch | black | Crew on the black → |
+|---|---|---|---|
+| 135–255° | green | green | nothing |
+| 270–300° at 4 m/s; 285–315° at 7.5 m/s | red | green (+6 … +33) | **demo ending**: ranch cut, black safe |
+| 315°+ at 4 m/s; 330° at 7.5 m/s | red | red / amber | no safe route (Q&A) |
+| 60–120° at 4 m/s; 45–90° at 7.5 m/s | green | red | REROUTED black → ranch (Q&A) |
+| 330–30° | red | red | no safe route |
+
+Full run with a jumpy sensor (±25°, ±30 % speed every 2 s), smoothing and the crew walking: the ranch turns red ~30 s after the fan reaches 295°; the black stays at 12–83 min margin. The black can flicker amber at large margins (the "dropped > 30 %" rule, §5.1) while the wind turns.
+
+**Dashboard** (`dashboard/src/App.tsx`): header Start / Reset (confirm) / Ignite at N2 + scenario clock + "N / 3 sensors live"; one Active escape route tile (name in status colour, crew walking, margin, ETA, leave-by in scenario time); map with a "Ready" box before Start, compass (top-right), Boulder Springs Ranch label + 100 m safety zone circle, 2013 deployment site; `sites.geojson` (post-2013 places) removed; tightest-point ring per route; hover popups on routes (crew / fire time and margin at that point) and sensor nodes (live reading); side panels: wind and fire spread (big arrow pointing where the wind pushes the fire), escape routes, alerts, map legend. The sensor feed panel and the four summary tiles are gone. Labels are HTML markers (MapLibre text needs a glyph server, which FireNet doesn't have). Route colours unchanged (§5.1).
+
+**Developing the dashboard locally** (no Pi deploy per change): `./run_demo.sh --dir-after 295 --wind-shift-after 45 --turn-s 150` (Docker broker + engine + bridge + simulator; dashboard at http://127.0.0.1:8000; press Start within 45 s) plus `cd dashboard && npm run dev` (http://localhost:5173, reloads on save). Against the Pi's live data: `VITE_WS_URL=ws://10.42.0.1:8000/ws VITE_API_URL=http://10.42.0.1:8000/api/cmd npm run dev`.
 
 **Open (decide with the team):** `WORST_WIND_MS = 10` with an unknown direction is already harsh: in dry SH5 any stale node turns every placeholder route red (head ROS ~480 m/min). Lower it, or use e.g. 1.5 × the current max, if the demo should show "margin drops" rather than "no safe route". The v2 plan raises it to 13.
 
@@ -763,7 +794,7 @@ Verified Sat Nov 7: three N3 heartbeats arrived at the local broker 10 s apart. 
 
 ### 8.4 Simulator
 `~/fire/simulator.py` on the Pi pretends to be N1–N3, so backend and dashboard can be built before the hardware. Code in Appendix A. Every 10 s it publishes one heartbeat per node to `sensors/<node>/wx`, and acts out the two demo situations:
-- **Wind shift** after `--wind-shift-after` s: direction 200° turning clockwise to 20° over `--turn-s` (was 270° → 180°), speed ~2 → 7.5 m/s, temp +4 °C, RH −5%.
+- **Wind shift** after `--wind-shift-after` s: direction 200° turning clockwise to `--dir-after` (default 20°; **295° for the current demo story**, §5.7) over `--turn-s` (was 270° → 180°), speed ~2 → 7.5 m/s, temp +4 °C, RH −5%.
 - **Silent node** after `--silent-after` s: `--silent-node` (default N3) stops sending.
 ```
 mosquitto_sub -h localhost -t 'sensors/#' -v
@@ -797,7 +828,7 @@ npm run build
 
 `ws_server.py` serves the generated `dashboard/dist` at `http://10.42.1.1:8000`; the same service provides the WebSocket at `/ws`. Do not commit `dashboard/dist`; build it on the Pi after `git pull`.
 
-**Integrated with the engine (Nov 8):** the map draws everything from `engine/state`: routes from each route's `path` (coloured by status, active one thicker), sensor nodes from `nodes` (fresh/aging/stale), spot fires, the crew, and the fire `areas` (black, burning, +5 / +10 min fronts; added to `engine/state` per §5.5 by `margin.fire_areas`, ~15 KB, ~30 ms). The hardcoded R1/R2 lines are gone. Reference layers: hillshade (corners from `meta.json`), 2013 final perimeter (dashed), 2013 descent line (dotted). Fixes: MapLibre v6 loads its worker from a separate file that the Vite build didn't ship, so no GeoJSON layer drew (now `setWorkerUrl` to the bundled worker); `package.json` pinned to exact versions (was `latest`); the WebSocket reconnects every 2 s. The engine's fire clock (16:20) now starts at the first sensor reading, not at engine start (it used to run on worst-case weather until the first reading and kept that history). Local run: `./run_demo.sh`. Simulator wind: `--dir-before 200` turning clockwise to `--dir-after 20` over `--turn-s` after `--wind-shift-after`.
+**Integrated with the engine (Nov 8):** the map draws everything from `engine/state`: routes from each route's `path` (coloured by status, active one thicker), sensor nodes from `nodes` (fresh/aging/stale), spot fires, the crew, and the fire `areas` (black, burning, +5 / +10 min fronts; added to `engine/state` per §5.5 by `margin.fire_areas`, ~15 KB, ~30 ms). The hardcoded R1/R2 lines are gone. Reference layers: hillshade (corners from `meta.json`), 2013 final perimeter (dashed), 2013 descent line (dotted). Fixes: MapLibre v6 loads its worker from a separate file that the Vite build didn't ship, so no GeoJSON layer drew (now `setWorkerUrl` to the bundled worker); `package.json` pinned to exact versions (was `latest`); the WebSocket reconnects every 2 s. The engine's fire clock (16:20) now starts at the first sensor reading, not at engine start (it used to run on worst-case weather until the first reading and kept that history). **Superseded the same morning: the clock starts on the dashboard's Start button (§5.7).** Layout as of ~06:40: §5.7. Local run: `./run_demo.sh`. Simulator wind: `--dir-before 200` turning clockwise to `--dir-after 20` over `--turn-s` after `--wind-shift-after`.
 
 ---
 
@@ -830,9 +861,9 @@ npm run build
 5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
 6. [x] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
-8. [ ] **Margin engine (Person A joins Vivek here, Nov 8):** in order (a) ~~`black0` cells in `graph.npz`~~ done Nov 8 (2,581 cells; descent point → black0 18.8 min, asserted in `build_graph.py`); (b) ~~engine routes over `graph.npz`~~ done Nov 8: `margin.load_graph` / `GraphTerrain` (terrain/fuel from the graph, no "SH5 everywhere" override) / `graph_routes` (crew cell → `ranch` / `black0` with `route()`, `seg_s` = the graph's edge costs, re-planned when the crew changes cell), `path` per route in `engine/state`; checks in `test_margin.py` (16 pass); 8 ms per recompute, 35 ms with a re-plan; (c) ~~fire spread from the black over the grid (§2.4)~~ done Nov 8, two open questions (§5.6 "fire spread" update); (d) ~~closures + reroute loop (§5.4)~~ done Nov 8 (§5.6 "closures" update); (e) `engine/state` per §5.5, with the fire and margin checks in §7. v1 (§5.6) is for testing only; `routes.geojson` (`build_graph.py --routes`) feeds it meanwhile.
-9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
-10. [ ] **Scenario simulator:** publish the crew position walking the 2013 descent line from the descent point at 16:20, real time, ignoring reroutes (spec "Scenario simulator").
+8. [ ] **Margin engine (Person A joins Vivek here, Nov 8):** in order (a) ~~`black0` cells in `graph.npz`~~ done Nov 8 (2,581 cells; descent point → black0 18.8 min, asserted in `build_graph.py`); (b) ~~engine routes over `graph.npz`~~ done Nov 8: `margin.load_graph` / `GraphTerrain` (terrain/fuel from the graph, no "SH5 everywhere" override) / `graph_routes` (crew cell → `ranch` / `black0` with `route()`, `seg_s` = the graph's edge costs, re-planned when the crew changes cell), `path` per route in `engine/state`; checks in `test_margin.py` (16 pass); 8 ms per recompute, 35 ms with a re-plan; (c) ~~fire spread from the black over the grid (§2.4)~~ done Nov 8, two open questions (§5.6 "fire spread" update); (d) ~~closures + reroute loop (§5.4)~~ done Nov 8 (§5.6 "closures" update); (e) `engine/state` per §5.5, with the fire and margin checks in §7 (`areas` done; Start / phases / per-point times / crew walk added, §5.7). v1 (§5.6) is for testing only; `routes.geojson` (`build_graph.py --routes`) feeds it meanwhile.
+9. [x] **Dashboard map layers** (Nov 8, §5.7; still to do: coloured terrain / fuel backdrop, demo-dashboard tickets 07–08): `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
+10. [x] ~~**Scenario simulator:** publish the crew position walking the 2013 descent line~~ Done differently Nov 8: the engine walks the crew along the active route after Start (§5.7).
 
 **Housekeeping**
 - [ ] Once fire spread + closures run on the graph (track 8c–d): delete `build_graph.py --routes` / `export_routes()`, `data/yarnell/routes.geojson` and the `travel_factor` path in `margin.load_routes` (the v1 placeholder checks still use `load_routes`).

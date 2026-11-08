@@ -11,7 +11,8 @@ MQTT broker → ws_server.py → WebSocket dashboard
 ```
 
 `ws_server.py` forwards every `sensors/#`, `engine/#`, and `crew/#` MQTT
-message to connected dashboards at `/ws`. `ingest.py` saves weather heartbeats
+message to connected dashboards at `/ws`. `POST /api/cmd` (`{"cmd": "start" | "reset" | "fire", ...}`) publishes
+the body to `engine/cmd` (the dashboard's Start / Reset buttons; no auth, closed FireNet only). `ingest.py` saves weather heartbeats
 from `sensors/+/wx` into the `readings` table. `engine.py` (margin engine)
 subscribes to the sensor, fire, crew and `engine/cmd` topics and publishes
 `engine/state` every second.

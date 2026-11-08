@@ -1,8 +1,10 @@
 """Margin engine service (docs/LCES_Design.md §5).
 
 MQTT in:  sensors/+/wx (weather; flame == 1 = spot fire at that node), sensors/+/fire,
-          crew/+/pos, engine/cmd ({"cmd": "reset"} | {"cmd": "fire", "node"|"lat"+"lon"} |
+          crew/+/pos, engine/cmd ({"cmd": "start"} | {"cmd": "reset"} | {"cmd": "fire", "node"|"lat"+"lon"} |
           {"cmd": "crew", "lat", "lon"}).
+Phases: the engine starts in "ready" (no fire, margins null, nothing moves). {"cmd": "start"} -> "running":
+the scenario clock (config.SCENARIO_START, 16:20) and the fire grid start then. {"cmd": "reset"} -> "ready".
 MQTT out: engine/state every RECOMPUTE_S (format: see build_state / docs §5.5).
 
 Run:  uv run --group engine python engine.py            (MQTT_HOST etc. from .env)
@@ -16,13 +18,14 @@ import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 
 import config
 from fire_model import MODEL_NAME, Weather
 from margin import (FireGrid, FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
-                    fire_areas, load_routes, spreads_for, status_for, to_lonlat, to_utm, v1_fire_min)
+                    fire_grid_msg, load_routes, spreads_for, status_for, to_lonlat, to_utm, v1_fire_min)
 
 MISSING = {-1, -99}
 
@@ -66,7 +69,15 @@ class MarginEngine:
         """graph: routing graph (margin.load_graph); routes are then re-planned from the crew's cell."""
         self.terrain, self.routes, self.nodes, self.placeholder = terrain, routes, nodes, placeholder
         self.graph = graph
-        self.fire: FireGrid | None = None                    # graph mode: created at the first compute / reset
+        self.fire: FireGrid | None = None                    # graph mode: created at Start
+        self.phase = "ready"                                 # "ready" until {"cmd": "start"}, then "running"
+        self.started_ts: float | None = None                 # unix s of Start (= SCENARIO_START)
+        self.replan_ts: float | None = None                  # unix s of the last reroute, or of Start
+        self._ready_xy = None                                # crew cell the ready-phase routes were planned from
+        self.wind_avg: dict[str, tuple[float, float, float, float]] = {}   # node -> (t, ux, uy, speed) moving average
+        self.crew_external = False                           # a real crew/<id>/pos arrived: stop the simulated walk
+        self.crew_arrived = False
+        self._last_step: float | None = None
         self.latest: dict[str, tuple[dict, float]] = {}      # node -> (last wx message, rx time)
         self.fires: list[FirePoint] = []
         self.start_xy = self.crew_xy = tuple(routes[0].xy[0])   # default: start of the first route
@@ -86,10 +97,37 @@ class MarginEngine:
     def on_wx(self, data: dict, now: float) -> None:
         node = data["node"]
         self.latest[node] = (data, now)
+        w, d = _num(data, "wind_ms"), _num(data, "wind_dir")
+        if w is not None and d is not None:
+            self._smooth_wind(node, w, d, now)
         if data.get("flame") == 1 and node in self.nodes:
             self.add_fire(self.nodes[node]["x"], self.nodes[node]["y"], now, f"{node} flame sensor")
 
-    def add_fire(self, x: float, y: float, now: float, source: str) -> FirePoint:
+    def _smooth_wind(self, node: str, w: float, d: float, now: float) -> None:
+        """Exponential moving average (time constant WIND_SMOOTH_S) of the wind, the direction as a unit vector
+        so 350 deg and 10 deg average to 0 deg, not 180."""
+        ux, uy = math.sin(math.radians(d)), math.cos(math.radians(d))
+        prev = self.wind_avg.get(node)
+        if prev is None or now - prev[0] > config.health_s(node)[1]:
+            self.wind_avg[node] = (now, ux, uy, w)
+            return
+        t0, px, py, pw = prev
+        a = 1 - math.exp(-max(now - t0, 0) / config.WIND_SMOOTH_S)
+        self.wind_avg[node] = (now, px + a * (ux - px), py + a * (uy - py), pw + a * (w - pw))
+
+    def smoothed_wind(self, node: str) -> tuple[float | None, float | None]:
+        """(speed m/s, direction from, deg) of the moving average, rounded; (None, None) if no wind yet."""
+        if node not in self.wind_avg:
+            return None, None
+        _, ux, uy, w = self.wind_avg[node]
+        step, sstep = config.WIND_DIR_STEP_DEG, config.WIND_SPEED_STEP_MS
+        d = None if math.hypot(ux, uy) < 1e-6 else round(math.degrees(math.atan2(ux, uy)) % 360 / step) * step % 360
+        return math.ceil(w / sstep - 1e-9) * sstep, d
+
+    def add_fire(self, x: float, y: float, now: float, source: str) -> FirePoint | None:
+        if self.phase != "running":
+            print(f"[engine] ignoring fire ({source}): scenario not started", flush=True)
+            return None
         for f in self.fires:
             if math.hypot(f.x - x, f.y - y) < config.FIRE_MERGE_M:
                 return f                                     # same fire; keep its first-seen time
@@ -114,18 +152,34 @@ class MarginEngine:
         xy = to_utm(float(data["lon"]), float(data["lat"]))
         self.terrain.value("dem", *xy)                       # raises if outside the terrain patch
         self.crew_xy = xy
+        self.crew_external = True                            # real positions win over the simulated walk
 
     def on_cmd(self, data: dict, now: float) -> None:
         cmd = data.get("cmd")
-        if cmd == "reset":
+        if cmd == "start":
+            if self.phase == "running":
+                print("[engine] start ignored: already running", flush=True)
+                return
+            self.phase, self.started_ts, self.replan_ts = "running", now, now
+            self.active = None                               # picked again at the first running step
+            self._last_step, self.crew_arrived = None, False
+            if self.graph is not None:
+                self.fire = FireGrid(self.graph, now)        # the black at its start state = SCENARIO_START
+            self.event(now, f"Scenario started ({config.SCENARIO_START})")
+        elif cmd == "reset":
+            self.phase, self.started_ts, self.replan_ts = "ready", None, None
             self.fires.clear()
-            self.fire = None                                 # the black back to 16:00, clock restarts
+            self.fire = None
             self.active = None
             self.crew_xy = self.start_xy
+            self._ready_xy = None
+            self.crew_external, self.crew_arrived, self._last_step = False, False, None
             for h in self.history.values():
                 h.clear()
             self.drop_until.clear()
-            self.event(now, "Reset: fires cleared")
+            self.prev_route_status.clear()
+            self.events.clear()
+            self.event(now, "Reset: ready, press Start")
         elif cmd == "fire":
             x, y = self._xy_from(data)
             self.add_fire(x, y, now, data.get("source", "engine/cmd"))
@@ -142,7 +196,8 @@ class MarginEngine:
                 health[nid] = ("stale", None)                # never heard from
                 continue
             age = now - self.latest[nid][1]
-            status = "stale" if age >= config.STALE_S else "aging" if age >= config.AGING_S else "fresh"
+            aging_s, stale_s = config.health_s(nid)
+            status = "stale" if age >= stale_s else "aging" if age >= aging_s else "fresh"
             health[nid] = (status, age)
         return health
 
@@ -160,9 +215,12 @@ class MarginEngine:
                 if w is not None:
                     winds.append(w)                          # its last reading still counts
                 continue
+            if nid in self.wind_avg:                          # moving average, not the last jumpy reading
+                w, d = self.smoothed_wind(nid)
+            else:
+                d = _num(data, "wind_dir")
             if w is not None:
                 winds.append(w)
-            d = _num(data, "wind_dir")
             if d is not None and age < wind_from_age:
                 wind_from, wind_from_age = d % 360, age
             for value, bucket in ((_num(data, "temp_c"), temps), (_num(data, "rh"), rhs)):
@@ -201,18 +259,53 @@ class MarginEngine:
             status = "amber"                                 # dropping fast (§5.1)
         return status
 
+    def walk_crew(self, dt: float, now: float) -> None:
+        """Move the crew dt seconds along the active route at the modelled walking times (seg_s)."""
+        r = next((x for x in self.routes if x.id == self.active), None)
+        if r is None or dt <= 0 or len(r.xy) < 2:
+            return
+        xy, seg, c = r.xy, r.seg_s, np.asarray(self.crew_xy, float)
+        a, ab = xy[:-1], xy[1:] - xy[:-1]
+        l2 = (ab ** 2).sum(1)
+        f = np.clip(((c - a) * ab).sum(1) / np.where(l2 > 0, l2, 1), 0, 1)
+        i = int(np.argmin(np.hypot(*(a + f[:, None] * ab - c).T)))
+        f, left = float(f[i]), dt
+        while i < len(seg):
+            s_i = float(seg[i])
+            if not math.isfinite(s_i):
+                break                                        # impassable: stay put
+            rest = (1 - f) * s_i
+            if left < rest:
+                f += left / s_i
+                break
+            left -= rest
+            i, f = i + 1, 0.0
+        if i >= len(seg):
+            self.crew_xy = tuple(float(v) for v in xy[-1])
+            if not self.crew_arrived:
+                self.crew_arrived = True
+                self.event(now, f"Crew reached {r.to}")
+        else:
+            self.crew_xy = tuple(float(v) for v in xy[i] + f * (xy[i + 1] - xy[i]))
+
     def compute(self, now: float) -> dict:
         health = self.node_health(now)
         for nid, (status, _) in health.items():
             if status == "stale" and self.prev_node_status.get(nid) in ("fresh", "aging"):
-                self.event(now, f"Node {nid} stale (no data for {config.STALE_S} s): using worst-case values")
+                self.event(now, f"Node {nid} stale (no data for {config.health_s(nid)[1]:.0f} s): using worst-case values")
             self.prev_node_status[nid] = status
 
         wx, wx_notes = self.weather(health)
         spreads = spreads_for(self.fires, wx, self.terrain)
-        if self.graph is not None and (self.fire is not None or self.latest):
-            if self.fire is None:   # scenario start (16:20) = first sensor reading after engine start or reset
-                self.fire = FireGrid(self.graph, now)
+        if self.phase != "running":                         # ready: routes without fire, nothing moves
+            if self.graph is not None and self._ready_xy != tuple(self.crew_xy):
+                self.routes = graph_routes(self.graph, self.crew_xy)
+                self._ready_xy = tuple(self.crew_xy)
+            fire_min, max_flame = None, 0.0
+        elif self.graph is not None:
+            if config.CREW_WALK and not self.crew_external and self._last_step is not None:
+                self.walk_crew(now - self._last_step, now)
+            self._last_step = now
             self.fire.advance(now, wx, [(f.x, f.y, f.t0) for f in self.fires])
             self.routes = graph_routes(self.graph, self.crew_xy, self.fire, now)   # closures change every step
             fire_min = self.fire.fire_min(now)
@@ -231,19 +324,19 @@ class MarginEngine:
         def score(r):  # best margin first, then the faster route
             return (math.inf if r.margin_min is None else r.margin_min, -r.eta_min)
 
-        # The crew's plan is the fastest route that isn't red. It only changes when the
-        # current one turns red ("rerouted"), so the active route doesn't flicker.
+        # At Start the crew takes the fastest route that isn't red (on the 2013 data: the black). After that the
+        # active route only changes when it turns red and another route isn't ("rerouted"), so it doesn't flicker.
         best = max(results, key=score)
         not_red = [r for r in results if status[r.route.id] != "red"]
-        plan = min(not_red, key=lambda r: r.eta_min) if not_red else best
-        if not self.fires or self.active is None:
-            self.active = plan.route.id
-        elif status[self.active] == "red" and not_red:      # all red -> no reroute, NO SAFE ROUTE below
+        if self.active not in by_id:
+            self.active = (min(not_red, key=lambda r: r.eta_min) if not_red else best).route.id
+        if status[self.active] == "red" and not_red:        # all red -> no reroute, NO SAFE ROUTE below
             old, best = by_id[self.active], max(not_red, key=score)
             self.event(now, f"REROUTED: {self.active} -> {best.route.id} "
                             f"({self.active} margin {old.margin_min:.1f} min, "
                             f"{best.route.id} {'clear' if best.margin_min is None else f'{best.margin_min:.1f} min'})")
             self.active = best.route.id
+            self.replan_ts = now
         active = by_id[self.active]
 
         alerts = []
@@ -264,12 +357,15 @@ class MarginEngine:
         alerts += [text for _, text in self.events]
 
         state = self.build_state(now, health, wx, wx_notes, spreads, results, status, alerts, leave_by)
-        state["areas"] = fire_areas(self.fire, now) if self.fire is not None else None
+        state["fire_grid"] = fire_grid_msg(self.fire, now, self.started_ts) if self.fire is not None else None
         return state
 
     def build_state(self, now, health, wx, wx_notes, spreads, results, status, alerts, leave_by) -> dict:
         def r1(v):
             return None if v is None or not math.isfinite(v) else round(v, 1)
+
+        def pts(a):     # per-point minutes aligned with path; null = before the crew joins / fire never
+            return [None] * len(r.route.xy) if a is None else [r1(float(v)) for v in a]
 
         routes = []
         for r in results:
@@ -281,7 +377,8 @@ class MarginEngine:
             routes.append({"id": r.route.id, "name": r.route.name, "to": r.route.to,
                            "margin_min": r1(r.margin_min), "status": status[r.route.id],
                            "active": r.route.id == self.active, "eta_min": r1(r.eta_min), "worst": worst,
-                           "path": r.route.path_lonlat()})
+                           "path": r.route.path_lonlat(),
+                           "t_crew_min": pts(r.crew_pts), "t_fire_min": pts(r.fire_pts)})
         nodes = []
         for nid, (s, age) in health.items():
             n = self.nodes.get(nid, {})
@@ -297,10 +394,16 @@ class MarginEngine:
         clon, clat = to_lonlat(*self.crew_xy)
         return {
             "type": "state", "ts": round(now, 1), "scenario": config.SCENARIO, "model": MODEL_NAME,
+            "phase": self.phase, "started_ts": None if self.started_ts is None else round(self.started_ts, 1),
+            "scenario_start": config.SCENARIO_START,
+            "replan_ts": None if self.replan_ts is None else round(self.replan_ts, 1),
             "placeholder_data": self.placeholder,
             "weather": {"wind_ms": r1(wx.wind_ms), "wind_from": r1(wx.wind_from), "temp_c": r1(wx.temp_c),
                         "rh": r1(wx.rh), "m1h_pct": round(wx.m1h * 100), "notes": wx_notes},
-            "crew": {"lat": round(clat, 6), "lon": round(clon, 6)},
+            "crew": {"lat": round(clat, 6), "lon": round(clon, 6),
+                     "walking": self.phase == "running" and self.graph is not None and config.CREW_WALK
+                                and not self.crew_external and not self.crew_arrived,
+                     "arrived": self.crew_arrived},
             "active_route": self.active,
             "leave_by_ts": None if leave_by is None else round(leave_by),
             "routes": routes, "nodes": nodes, "fires": fires, "alerts": alerts,
@@ -312,7 +415,7 @@ def summary(state: dict) -> str:
                    f"({'-' if r['margin_min'] is None else r['margin_min']})" for r in state["routes"])
     ns = " ".join(f"{n['id']}:{n['status'][0]}" for n in state["nodes"])
     w = state["weather"]
-    return (f"routes {rs} | wind {w['wind_ms']} m/s from {w['wind_from']} | "
+    return (f"{state['phase']} | routes {rs} | wind {w['wind_ms']} m/s from {w['wind_from']} | "
             f"T {w['temp_c']} RH {w['rh']} | fires {len(state['fires'])} | nodes {ns}")
 
 
@@ -390,7 +493,7 @@ def main() -> None:
                 state = engine.compute(t0)
             client.publish(config.STATE_TOPIC, json.dumps(state))
             # Print when a status / the active route / node health changes, else every 10 s.
-            key = (state["active_route"], tuple(r["status"] for r in state["routes"]),
+            key = (state["phase"], state["active_route"], tuple(r["status"] for r in state["routes"]),
                    tuple(n["status"] for n in state["nodes"]), len(state["fires"]))
             if key != last_key or t0 - last_print > 10:
                 print(f"[engine] {time.strftime('%H:%M:%S')} {summary(state)}  "

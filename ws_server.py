@@ -9,7 +9,8 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
@@ -20,8 +21,12 @@ MQTT_USERNAME = os.getenv("MQTT_USERNAME") or None
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD") or None
 ALLOW_SIMULATOR_DATA = os.getenv("ALLOW_SIMULATOR_DATA", "false").lower() in {"1", "true", "yes"}
 
+CMD_TOPIC = "engine/cmd"
+ALLOWED_CMDS = {"start", "reset", "fire"}   # dashboard buttons; "crew" etc. stay MQTT-only
+
 clients: set[WebSocket] = set()
 latest: dict[str, dict] = {}
+mqtt_client: mqtt.Client | None = None      # set in lifespan; used by POST /api/cmd
 
 
 @asynccontextmanager
@@ -74,10 +79,13 @@ async def lifespan(app: FastAPI):
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
     client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
     client.loop_start()
+    global mqtt_client
+    mqtt_client = client
     task = asyncio.create_task(broadcaster())
     try:
         yield
     finally:
+        mqtt_client = None
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
@@ -86,6 +94,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LCES Live MQTT bridge", lifespan=lifespan)
+# The Vite dev server (another port) calls /api/cmd too.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
+
+
+@app.post("/api/cmd")
+async def engine_cmd(body: dict = Body(...)) -> dict:
+    """Dashboard Start / Reset / Ignite -> engine/cmd, body published unchanged.
+
+    No auth: FireNet is a closed network and this is a demo. Do not expose port 8000 elsewhere.
+    """
+    if body.get("cmd") not in ALLOWED_CMDS:
+        raise HTTPException(400, f"cmd must be one of {sorted(ALLOWED_CMDS)}")
+    if mqtt_client is None or not mqtt_client.is_connected():
+        raise HTTPException(503, "MQTT broker not connected")
+    info = mqtt_client.publish(CMD_TOPIC, json.dumps(body), qos=0)
+    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+        raise HTTPException(503, f"MQTT publish failed (rc {info.rc})")
+    return {"ok": True}
 
 
 @app.get("/api/sensors/latest")

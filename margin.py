@@ -7,8 +7,10 @@ each safety zone over the routing graph (graph_routes, ADR 0001). Without it (v1
 the LineStrings in routes.geojson, each evaluated on its own along its densified points.
 "Rerouting" = switching the active route to the one with the best margin.
 """
+import base64
 import json
 import math
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -264,6 +266,8 @@ class RouteResult:
     t_fire_min: float | None     # at the worst point
     t_crew_min: float | None     # at the worst point
     eta_min: float               # crew to safety zone
+    crew_pts: np.ndarray | None = None   # (n,) minutes until the crew reaches each route point (nan before join)
+    fire_pts: np.ndarray | None = None   # (n,) safety-factored minutes until fire there (inf = never, nan before join)
 
 
 def spreads_for(fires: list[FirePoint], wx: Weather, terrain: Terrain) -> list[tuple[FirePoint, Spread]]:
@@ -289,16 +293,23 @@ def evaluate(routes: list[Route], fire_min, crew_xy) -> list[RouteResult]:
         k, t_crew_s = route.crew_seconds(crew_xy)
         t_crew = t_crew_s / 60
         eta = float(t_crew[-1])
+        n = len(route.xy)
+        crew_pts = np.full(n, np.nan)
+        crew_pts[k:] = t_crew
+        fire_pts = np.full(n, np.nan)
         if fire_min is None:
-            results.append(RouteResult(route, None, None, None, None, eta))
+            fire_pts[k:] = np.inf
+            results.append(RouteResult(route, None, None, None, None, eta, crew_pts, fire_pts))
             continue
         t_fire = fire_min(route.xy[k:])
+        fire_pts[k:] = t_fire
         m = t_fire - t_crew
         i = int(np.argmin(m))
         if not math.isfinite(m[i]):          # fire never reaches this route (e.g. non-burnable)
-            results.append(RouteResult(route, None, None, None, None, eta))
+            results.append(RouteResult(route, None, None, None, None, eta, crew_pts, fire_pts))
             continue
-        results.append(RouteResult(route, float(m[i]), k + i, float(t_fire[i]), float(t_crew[i]), eta))
+        results.append(RouteResult(route, float(m[i]), k + i, float(t_fire[i]), float(t_crew[i]), eta,
+                                   crew_pts, fire_pts))
     return results
 
 
@@ -340,7 +351,7 @@ class FireGrid:
         self.src, self.dst, self.step = src[ok], dst[ok], step[ok]
         self.length = float(g["res"]) * np.hypot(*np.array(self.STEPS).T)[self.step]
         self._step_of = {int(o): k for k, o in enumerate(offset)}
-        self.arrival = np.where(self.black0, start, np.inf)
+        self.arrival = np.where(self.black0 & self.burnable, start, np.inf)   # black0 still counts as black (black())
         self.flame = np.zeros(n)          # flame length (m) of the fire as it reached each cell
         self._wx = None
 
@@ -444,6 +455,26 @@ def fire_areas(fire: FireGrid, now: float) -> dict:
             polys.append(rings)
         out[name] = {"type": "MultiPolygon", "coordinates": polys}
     return out
+
+
+def fire_grid_msg(fire: FireGrid, now: float, t0: float) -> dict:
+    """engine/state `fire_grid`: fire arrival per grid cell, so the dashboard can redraw the fire every frame
+    (smooth, sub-cell fronts) instead of 1 s polygon steps. data = base64(zlib(uint16 little-endian, row-major,
+    row 0 = north)): 0 = the black at Start (black0); k >= 1 = arrival at t0 + (k - 1) * unit_s;
+    65535 = not within the next FIRE_GRID_HORIZON_S (or never). corners: lon/lat tl, tr, br, bl."""
+    g, a = fire.g, fire.arrival
+    nr, nc = (int(v) for v in g["shape"])
+    unit, horizon = config.FIRE_GRID_UNIT_S, now + config.FIRE_GRID_HORIZON_S
+    q = np.full(a.shape, 65535, np.uint16)
+    soon = np.isfinite(a) & (a <= horizon)
+    q[soon] = np.clip(np.round((a[soon] - t0) / unit) + 1, 1, 65534)
+    q[fire.black0] = 0
+    x0, ytop, res = float(g["x0"]), float(g["ytop"]), float(g["res"])
+    xs, ys = [x0, x0 + nc * res, x0 + nc * res, x0], [ytop, ytop, ytop - nr * res, ytop - nr * res]
+    lon, lat = _TO_LONLAT.transform(xs, ys)
+    return {"cols": nc, "rows": nr, "t0": round(t0, 3), "unit_s": unit, "burnout_s": config.BURNOUT_S,
+            "corners": [[round(float(o), 6), round(float(l), 6)] for o, l in zip(lon, lat)],
+            "data": base64.b64encode(zlib.compress(q.astype("<u2").tobytes(), 6)).decode()}
 
 
 def status_for(margin_min: float | None) -> str:

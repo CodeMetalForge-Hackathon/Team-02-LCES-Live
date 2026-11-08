@@ -236,8 +236,10 @@ From any device on FireNet (laptop, phone, tablet): **http://10.42.1.1:8000**
 What you should see:
 
 - Top right "Bridge connected"; "Margin engine: Running".
-- "N / 3 live" sensors. Until the first sensor reading the engine uses worst-case weather, and the fire clock
-  (16:20 in the scenario) starts at that first reading.
+- "N / 3 live" sensors. Until the first sensor reading the engine uses worst-case weather.
+- The engine starts in **ready**: no fire spread, margins empty, crew on the fastest route (the black). The scenario clock
+  (16:20) and the fire start when you press **Start** (or `mosquitto_pub -h localhost -t engine/cmd -m '{"cmd":"start"}'`).
+  **Reset** goes back to ready.
 - Map: hillshade of Yarnell; the black (dark), burning edge (red), where the fire will be in 5 / 10 min
   (orange / yellow); the two escape routes coloured green / amber / red (the active one thicker); the crew
   (white dot, blue ring); sensor nodes (blue = fresh, yellow = aging, grey = stale); 2013 perimeter (dashed red)
@@ -256,11 +258,12 @@ services (step 4), then in three terminals:
 ```bash
 cd ~/fire && UV_OFFLINE=1 uv run python engine.py --allow-sim
 cd ~/fire && ALLOW_SIMULATOR_DATA=true UV_OFFLINE=1 uv run uvicorn ws_server:app --host 0.0.0.0 --port 8000
-cd ~/fire && UV_OFFLINE=1 uv run python simulator.py --wind-shift-after 45 --turn-s 150 --silent-after 100000
+cd ~/fire && UV_OFFLINE=1 uv run python simulator.py --dir-after 295 --wind-shift-after 45 --turn-s 150 --silent-after 100000
 ```
 
-The wind starts from 200° (SSW, both routes green) and turns to 20° (the NNE outflow): the ranch route goes
-red, then the black route, then "NO SAFE ROUTE". Restart the normal services (step 4) afterwards.
+Press **Start** on the dashboard first. The wind starts from 200° (SSW, both routes green) and turns to 295° (the
+WNW outflow): the ranch route goes red, the crew's route back to the black stays green (the demo ending). Without
+`--dir-after` it turns to 20° (NNE): both routes red, "NO SAFE ROUTE" (Q&A only). Restart the normal services (step 4) afterwards.
 
 On a laptop, `./run_demo.sh` does the same thing with a Docker broker.
 

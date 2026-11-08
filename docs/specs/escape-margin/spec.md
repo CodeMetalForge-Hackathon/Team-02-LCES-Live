@@ -22,6 +22,8 @@ A margin engine on the Pi that continuously answers: margin = (when the fire rea
 
 For the demo (2013 replay, real time, kept close to what happened; decided Nov 8): the scenario starts at 16:20 with the crew at the saddle (descent point) heading for Boulder Springs Ranch, the black ~19 min behind them. Until ~16:00 the wind blew from the SSW and pushed the fire north-east, away from them; both escape routes are green. A fan on N1 is the outflow: over the next hour the wind swung 180° to come from the NNE and the fire ran south onto them. On screen the ranch route goes red, then the black route too: "no safe route". There is no reroute that saves them from the saddle (checked on the traced 16:15 fire: the black stays green under the outflow only within ~6 min of it). The simulated crew keeps walking the 2013 line, so the audience watches the margin collapse on the path the real crew took. A hair dryer on N2 adds a spot fire across the canyon. Unplugging N3 greys it out and the margin drops.
 
+**Revised Nov 8, ~05:30–06:35 (`docs/specs/demo-dashboard/spec.md`):** the scenario starts on a Start button (not the first sensor reading). At Start the crew takes the fastest safe route (the black) and walks it (story 35, done along the active route rather than the 2013 descent line). The demo ends when the fan reaches the WNW (~290–300°): the ranch route (where the 2013 crew went) is cut, and the crew's route to the black stays green. No reroute in the main story; turning on to the NNE ("no safe route") is for Q&A only. N1's wind is smoothed (20 s moving average) before the fire model. Stories 33–34 below are refined there.
+
 ## User Stories
 
 ### Crew boss: margin and routes

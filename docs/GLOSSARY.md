@@ -59,7 +59,7 @@ The fastest current path from the crew to one specific safety zone; there is one
 _Avoid_: route (alone), path
 
 **Active route**:
-The escape route with the best margin right now.
+The escape route the crew is following: the fastest route that isn't red at Start, then it changes only by a reroute.
 
 **Reroute**:
 A change of the active route, either a new path to the same safety zone or a switch to another safety zone.
