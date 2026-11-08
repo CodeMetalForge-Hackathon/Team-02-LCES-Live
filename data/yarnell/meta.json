@@ -1,0 +1,68 @@
+{
+ "fetched_utc": "2026-11-08T01:38:33+00:00",
+ "crs": "EPSG:32612",
+ "res_m": 10,
+ "size_px": 500,
+ "bounds_utm": [
+  334640,
+  3785520,
+  339640,
+  3790520
+ ],
+ "corners_lonlat_tl_tr_br_bl": [
+  [
+   -112.79563489766447,
+   34.242655462678805
+  ],
+  [
+   -112.74136258743037,
+   34.24343853460769
+  ],
+  [
+   -112.74043513697265,
+   34.198366436838036
+  ],
+  [
+   -112.7946785790113,
+   34.19758468078941
+  ]
+ ],
+ "elev_m": [
+  1030.9,
+  1851.1
+ ],
+ "slope_deg_max": 63.3,
+ "fuel_share": {
+  "91": 0.064,
+  "99": 0.044,
+  "101": 0.018,
+  "102": 0.062,
+  "121": 0.023,
+  "122": 0.758,
+  "141": 0.001,
+  "142": 0.012,
+  "145": 0.0,
+  "147": 0.01,
+  "182": 0.0,
+  "183": 0.004,
+  "185": 0.004,
+  "186": 0.0,
+  "188": 0.0
+ },
+ "osm_counts": {
+  "highway": 198,
+  "natural": 5,
+  "waterway": 8,
+  "building": 434,
+  "barrier": 6
+ },
+ "perimeter_acres": [
+  7954.33
+ ],
+ "sources": {
+  "dem": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer (USGS 3DEP seamless, best available, resampled to 10 m)",
+  "fuel": "https://lfps.usgs.gov/arcgis/rest/services/Landfire_LF2025/LF2025_FBFM40_CONUS/ImageServer (LANDFIRE LF2025, 30 m native)",
+  "perimeter": "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/InterAgencyFirePerimeterHistory_All_Years_View/FeatureServer/0 (NIFC InterAgency Fire Perimeter History)",
+  "osm": "OpenStreetMap contributors, ODbL, via Overpass"
+ }
+}

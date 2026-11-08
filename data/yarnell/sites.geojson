@@ -1,0 +1,77 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -112.7775,
+     34.22046
+    ]
+   },
+   "properties": {
+    "name": "Fatality / deployment site",
+    "osm_node": 4614226668,
+    "utm": [
+     336267.3,
+     3788029.2
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -112.78221,
+     34.22146
+    ]
+   },
+   "properties": {
+    "name": "Observation deck (ridge)",
+    "osm_node": 4614226669,
+    "utm": [
+     335835.3,
+     3788147.6
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -112.77446,
+     34.20349
+    ]
+   },
+   "properties": {
+    "name": "Hotshot Journey Trailhead",
+    "osm_node": 11757122998,
+    "utm": [
+     336514.5,
+     3786142.3
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -112.74709,
+     34.22219
+    ]
+   },
+   "properties": {
+    "name": "Yarnell (town centre)",
+    "osm_node": null,
+    "utm": [
+     339072.1,
+     3788172.5
+    ]
+   }
+  }
+ ]
+}

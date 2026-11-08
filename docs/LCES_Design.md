@@ -24,8 +24,9 @@ Core question the system answers, continuously:
 | FireNet hotspot on the Pi | **On**; Pi = `10.42.1.1` on FireNet (verified by the wind bridge) | Vivek | Point all ESP32s at `10.42.1.1` |
 | Laptop ↔ Pi SSH over Ethernet | Done, VS Code Remote-SSH works | Vivek | Share access with the team |
 | Simulator (fake N1–N3) | Running, verified | Vivek | Teammates copy it for local dev |
-| PostGIS database + ingest | **Implemented and verified locally with simulator data** | Teammate | Deploy to the Pi database; verify real Pi MQTT messages are stored |
+| PostGIS database + ingest | **Real node data ingested and verified** (Nov 7) | Teammate | Re-apply `schema.sql` (drops the seq constraint) |
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
+| Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, tabletop crop, travel factor from EVC/EVH, load into PostGIS |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
 | Margin engine | Not started | Vivek | After ingest: staleness, trail graph, fire/escape model |
 | Flame sensor | Not started | TBD | — |
@@ -101,7 +102,7 @@ Local Docker development services: `fireguard-mqtt` exposes Mosquitto at `127.0.
 
 `simulator.py` now adds `"_simulated": true` to its messages. The two services ignore marked simulator messages by default (`ALLOW_SIMULATOR_DATA=false`), so a live run will not pollute the dashboard cache or database. Set `ALLOW_SIMULATOR_DATA=true` only for intentional offline simulator testing. This marker is specific to the project simulator; real sensor messages remain unchanged.
 
-**Known issues from code review (Sat Nov 7 evening, not fixed yet):**
+**Known issues from code review (Sat Nov 7 evening). #1, #2 and #4 fixed Nov 7; re-apply `schema.sql` on any existing database to drop the old constraint:**
 1. **Readings are dropped after a node restarts.** `readings` has `UNIQUE (node_id, seq)` and `ingest.py` inserts with `ON CONFLICT DO NOTHING`. Every node restarts `seq` at 0 on reboot or power loss (ESP32 nodes, and the wind bridge when it restarts). From then on, its new readings are silently discarded until `seq` passes the old maximum. `nodes.last_seen` still updates and `ingest.py` still prints `Saved <node> seq=…`, so it is easy to miss. This hits the grey-node demo (unplug a node, plug it back). Suggested fix: drop the unique constraint. QoS 0 MQTT never redelivers, so the duplicates it guards against don't occur. Alternative: add a per-boot id to the payload.
 2. `ws_server.py` waits with `websocket.receive()`. After a client disconnects, the next `receive()` raises `RuntimeError` instead of `WebSocketDisconnect`, so every closed dashboard tab logs an error (functionally harmless). Fix: use `receive_text()`.
 3. Pi deployment: `uv sync` needs internet, but with FireNet on the Pi has none, and `python-dotenv` is a new dependency. Sync before turning FireNet on. `/home/thunder/fire` is the older `uv init` project, not a clone of this repo; decide whether to clone the repo there or copy the files.
@@ -206,6 +207,7 @@ def arrival_min(run, fire_xy, pt_xy):           # metres (after §1.4 transform)
 |---|---|---|
 | Suppression limit | flame < 1.2 m hand crews OK · 1.2–2.4 m equipment only · > 2.4 m control efforts fail | Fire characteristics chart / hauling chart |
 | **Safety zone adequacy** | Required separation ≥ **4 × flame height** (use flame_length as the proxy). Alert if a safety zone's radius is smaller | Butler & Cohen 1998. Behave's safety module isn't exposed, so it's one line of our own code |
+| Safety zone adequacy (vegetation-height version, **to verify**) | Current NWCG guidance sizes the separation from **vegetation height**, slope and wind (≈ 8 × vegetation height × slope/wind factor). LANDFIRE EVH gives vegetation height for every cell, so this could replace the 4× flame rule and auto-suggest safety zones (low or non-burnable patches big enough, near routes) | Butler 2014; NWCG safety zone guide. **Check the formula against the source before use** |
 | Crown fire threshold (timber sites only) | `calculate_crowning_index()` = wind speed where an active crown fire starts, i.e. a wind-based trigger | Not relevant to chaparral. Test output looked odd (crowning with crown ROS < surface ROS), so **verify against BehavePlus before use** |
 
 ### 2.6 Known pyrothermel caveats
@@ -222,14 +224,62 @@ Head ROS ≈ 10% of 10-m open wind speed (Cruz & Alexander 2019, **forests and s
 
 ## 3. Terrain and fuel data (static, loaded once)
 
+### 3.1 Yarnell patch: done (Nov 7)
+**Patch:** 5 km × 5 km, 10 m grid (500 × 500), **EPSG:32612**, bounds `334640 3785520 339640 3790520` (lon/lat ≈ 34.1976–34.2434 N, −112.7956 to −112.7404). It covers the deployment site, the ridge above it, the Hotshot Journey trailhead and Yarnell town. The tabletop's 2 km × 2 km gets cropped from it (§1.4).
+
+Rebuild (needs internet, no GDAL install needed; rasterio bundles it): `uv run --with rasterio --with pyproj python data/fetch_yarnell.py` → `data/yarnell/`
+
+| File (`data/yarnell/`) | Content | Source |
+|---|---|---|
+| `dem.tif` | Elevation, m, float32 | USGS 3DEP ImageServer (best available, resampled to 10 m) |
+| `slope.tif`, `aspect.tif` | Degrees. Aspect = direction the slope faces (downhill), 0 where flat (= `gdaldem -zero_for_flat`) | Horn method in numpy, self-checked |
+| `fuel.tif` | FBFM40 codes, uint16 (nearest neighbour from 30 m) | LANDFIRE **LF2025** FBFM40 ImageServer (no email needed) |
+| `hillshade.png` | Map background; corner lon/lat in `meta.json` for a MapLibre image source | From the DEM |
+| `perimeter.geojson` | Final perimeter, Yarnell Hill 2013, 7,954 ac | NIFC InterAgency Fire Perimeter History |
+| `osm.geojson` | 198 roads/tracks/trails, 434 buildings, water, 6 fences | OpenStreetMap (Overpass) |
+| `sites.geojson` | Fatality/deployment site, observation deck (ridge), Hotshot Journey Trailhead, Yarnell town; OSM node ids in properties | OpenStreetMap |
+| `meta.json` | Bounds, corners, sources, fetch time, value summaries | — |
+
+**Manual downloads (also in the repo, offline copies):**
+- `docs/USGS_13_n35w113.tif`: 3DEP 1/3 arc-second tile (NAD83 geographic, covers 34–35 N, 112–113 W; tiles are named after their **north** edge). **440 MB, don't commit** (move to `data/raw/` and gitignore). Direct URL: `https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/n35w113/USGS_13_n35w113.tif`
+- `data/landfire_5fb9e848-…/`: LANDFIRE LFPS download, LF2025 **FBFM40, EVC, EVH, EVT**, 30 m, native Albers (EPSG:5070), box 34.18–34.26 N, −112.82 to −112.72. Code meanings are in each `*.tif.vat.dbf`.
+- Request native Albers from LANDFIRE and reproject once yourself with `-r near` (choosing UTM there means a second resample).
+- Optional: 1 m lidar from 2021 (`AZ_Yavapai_2021_B21`, tiles `x33y379`, `x33y380`) exists for a sharper hillshade.
+
+**Cross-checks (both paths agree):**
+- DEM: tile vs ImageServer, median |diff| 0.12 m, 99th percentile 0.9 m, max 2.1 m. The difference grows with slope and mostly disappears with a 1 m east shift, so it comes from resampling/datum handling (NAD83 vs WGS84 ≈ 1 m), not bad data. Below the source's own ~1–2 m accuracy. Prefer the tile (one resample under our control, works offline).
+- Fuel: LFPS download vs ImageServer, 99% of cells identical (differences at cell edges).
+- Sites sampled: Yarnell town 1,458 m (published ≈ 4,780 ft), deployment site 1,537 m, ridge deck 1,685 m.
+
+**What the data says about the patch:**
+- Fuel (LF2025 FBFM40): 76% **GS2 (122)**, then 91 urban 6%, GR2 6%, 99 bare 4%. Inside the 2013 perimeter it is almost uniformly GS2: post-fire regrowth. **LANDFIRE has nothing before LF2016, so no pre-fire fuel layer exists.**
+- Vegetation type (EVT): **51% Mogollon Chaparral**, 29% Madrean pinyon-juniper. So it *is* chaparral, just young, which supports SH5 for the 2013 replay.
+- Shrub height (EVH): mostly 1.1–1.4 m (chest high). Shrub cover (EVC): mostly 26–31%.
+- Canopy layers (CC, CH, CBH, CBD) skipped: crown-fire inputs; there's almost no timber here (§2.5).
+
+**Fuel decision:** 2013 replay → SH5 inside the 2013 perimeter (pre-fire chaparral, as the investigation describes). "If it happened today" → LF2025 `fuel.tif` as is.
+
+### 3.2 Yarnell: left to do
+- [ ] Put EVC/EVH/EVT on the 10 m grid (nearest neighbour from the LFPS download) and turn shrub height × cover into the off-trail travel factor (replaces the placeholder per-fuel factors in §4.3).
+- [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LFPS rasters (`gdalwarp -r bilinear` / `-r near`); keep the ImageServers as a cross-check.
+- [ ] From the Yarnell Hill investigation report: Boulder Springs Ranch (the 2013 safety zone; **not in OSM, don't guess**), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed).
+- [ ] Choose the tabletop's 2 km × 2 km crop and `SCALE`/`E0`/`N0` (§1.4).
+- [ ] Load rasters (`raster2pgsql`, ships with PostGIS on the Pi) and GeoJSON (`ogr2ogr`, or psycopg + `ST_GeomFromGeoJSON`) into PostGIS.
+- [ ] SH5 override inside the perimeter for the 2013 replay (one flag in `config.py`).
+- [ ] Optional: offline street basemap (PMTiles); 1 m lidar hillshade.
+
+### 3.3 General layer reference
 | Layer | Source | Use |
 |---|---|---|
 | Elevation (DEM) | USGS 3DEP 10 m (apps.nationalmap.gov/downloader) or LANDFIRE elevation | Tobler slopes, hillshade |
 | Slope, aspect | LANDFIRE (precomputed) or `gdaldem slope/aspect dem.tif` (`-zero_for_flat` for aspect) | pyrothermel inputs |
 | Fuel model | **LANDFIRE FBFM40** | pyrothermel fuel + travel factors |
+| Vegetation cover / height (EVC, EVH) | LANDFIRE | Travel factor (brush density and height) |
 | Water | LANDFIRE NB8, USGS NHD, OSM | Barrier |
 | Buildings, fences | OSM | Barrier |
 | Understory density (field version) | USGS 3DEP lidar: share of returns 0.5–3 m above ground | Travel factor (Campbell et al. 2017) |
+
+GDAL command-line tools (`sudo apt install gdal-bin`) are optional: rasterio covers reprojection and the numpy code covers slope/aspect/hillshade. They're handy for manual steps and checks (`gdalinfo -stats`), and QGIS brings them anyway.
 
 Loading:
 ```bash
@@ -248,7 +298,20 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
 
 ### 4.1 Graph: two layers joined together
 1. **Trail graph.** Demo: **hand-drawn** on the tabletop map (2–3 routes + alternates, snapped at junctions), digitised in tabletop cm and transformed (§1.4). Later: OSM via `osm2pgrouting`, or USFS trails + `pgr_extractVertices`. Check OSM coverage at Yarnell before relying on it.
-2. **Off-trail grid graph.** Every 10 m DEM cell is a node with 8 neighbours (16 with knight moves, for smoother paths). 2 km × 2 km ≈ 40k nodes / 320k edges, fine for `pgr_dijkstra`. Join trail vertices to the nearest grid cells.
+2. **Off-trail grid graph.** Every 10 m DEM cell is a node with 8 neighbours (16 with knight moves, for smoother paths). Join trail vertices to the nearest grid cells.
+
+**How the grid is built** (`build_graph.py`, Python + numpy, written to PostGIS with `COPY`; runs once):
+- **Area:** only the tabletop's 2 km × 2 km crop (§1.4), not the full 5 km patch: 200 × 200 = **40,000 nodes**. The full patch would be 250k nodes / ~1M edges, and pgRouting reloads every edge on every query, too slow for the < 2 s target.
+- **Nodes (`grid_nodes`):** one per cell centre. `id = row * 200 + col`, `geom` = cell centre, `elev` from the DEM, `veg_factor` from §4.3.
+- **Edges (`grid_edges`):** store only 4 of the 8 directions per node (E, SE, S, SW); the other 4 are the same edges seen from the neighbour. Each row has `cost` (source → target) and `reverse_cost` (target → source). ≈ 160k rows.
+  ```
+     NW  N  NE          store only:  E, SE, S, SW
+      W  ●  E
+     SW  S  SE
+  ```
+- **Impassable** (cost `-1`): slope > 38°, water/buildings (OSM polygons stamped onto the grid), diagonal corner-cutting past an impassable cell. Vegetation is **never** impassable (§4.3).
+- **Trails:** OSM roads/tracks/trails + the hand-drawn tabletop routes, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing runs over `grid_edges UNION ALL trails UNION ALL connectors`.
+- Crew position and safety zones are **snapped** to their nearest node: `SELECT id FROM grid_nodes ORDER BY geom <-> pt LIMIT 1`.
 
 Why both: crews mostly use trails, but Yarnell's crew went cross-country, so a trail-only graph can't represent that.
 
@@ -280,20 +343,43 @@ UPDATE trails SET
 Sanity check: a 100 m segment climbing 10 m costs ≈ 101 s uphill and ≈ 71 s downhill.
 Endpoints outside the DEM give NULL dz, so check `WHERE cost IS NULL` after loading.
 
-### 4.3 Travel factors (multiplier on Tobler speed; 0 = impassable)
-**Placeholders I made up. Calibrate with Campbell et al. 2017 and the operator mentor.** Keep them in `config.py`.
+### 4.3 Travel factors (multiplier on Tobler speed)
+**Vegetation slows the crew, it never blocks.** Crews can push through brush (the Yarnell crew did); marking it impassable would report "no route" when a slow one exists, or hide the route the crew is on. A slow route can still be compared against the fire's arrival time and turn amber/red. So vegetation gets a factor with a **floor of 0.1**, and only hard limits are impassable.
 
-| Ground | Factor |
+**Per edge:** `factor = min(veg_factor[source], veg_factor[target])` (the slowest cell governs the step). Vegetation costs the same in both directions; only slope makes uphill ≠ downhill. **Trail edges always use 1.0.**
+
+**veg_factor per cell** from LANDFIRE EVH (height) × EVC (cover), a lookup table in `config.py`. **Placeholders: calibrate with the operator mentor and Campbell et al. 2017.** A table is easier to calibrate than a formula: change one cell at a time.
+
+| Shrub height \ cover | < 25% | 25–50% | > 50% |
+|---|---|---|---|
+| < 0.5 m (knee) | 0.9 | 0.8 | 0.7 |
+| 0.5–1.5 m (waist–chest) | 0.7 | 0.5 | 0.3 |
+| > 1.5 m (over head) | 0.5 | 0.3 | **0.1** (floor) |
+
+| Other ground | Factor |
 |---|---|
 | Trail / road | 1.0 |
-| Bare ground (NB9), grass (GR) | 0.8 |
-| Grass-shrub (GS), timber litter (TL) | 0.6 (Tobler's own off-path factor) |
-| Light shrub (SH1–3) | 0.4 |
-| Timber understory (TU) | 0.3 |
-| Heavy shrub / chaparral (SH5–9) | 0.15 |
-| Water (NB8), buildings, fences | 0 |
-| Slope > 38° | 0 |
-| **Cells the fire reaches before the crew, or within 4 × flame height of the front** | 0 (dynamic) |
+| Grass / herb | 0.8 |
+| Bare ground (off-trail but clear) | 0.8 |
+| Open pinyon-juniper (tree cells; understory unknown) | 0.7 |
+| Water, buildings, fences, slope > 38° | impassable |
+| **Cells the fire reaches before the crew, or within 4 × flame height of the front** | blocked per recompute (§5.4) |
+
+**Yarnell 2025 data:** shrub cover 24–34% (max 51%), height 0.3–1.5 m (max 2.0 m); no shrub cell is both ≥ 50% cover and ≥ 1.5 m. So today's patch is mostly 0.5–0.7. **2013 replay:** cells inside the 2013 perimeter set to 0.1 (old dense chaparral; take the description from the investigation report), via a `config.py` flag.
+
+**Worked example**, one 10 m step on flat ground (Tobler ≈ 5.0 km/h):
+
+| Ground | Factor | Speed | 10 m takes | Distance in 10 min |
+|---|---|---|---|---|
+| Trail | 1.0 | 5.0 km/h | 7 s | 840 m |
+| Typical here (1.2 m, 30% cover) | 0.5 | 2.5 km/h | 14 s | 420 m |
+| 2013 replay, old dense chaparral | 0.1 | 0.5 km/h | 71 s | 84 m |
+
+So a 400 m shortcut through old chaparral costs about as much time as 4 km of trail.
+
+**Fallback** if EVC/EVH aren't on the grid yet (by fuel model): bare/grass 0.8 · GS/TL 0.6 · SH1–3 0.4 · TU 0.3 · SH5–9 0.15.
+
+**Build:** EVC/EVH reprojected to the 10 m grid with nearest neighbour → lookup → `grid_nodes.veg_factor` → edge costs when `grid_edges` is built.
 
 ### 4.4 Route quality
 - 8-direction grids zigzag (~8% too long). Use 16 neighbours, or simplify the path afterwards and re-check it against barriers.
@@ -306,6 +392,8 @@ Endpoints outside the DEM give NULL dz, so check `WHERE cost IS NULL` after load
 ### 4.6 Tool decision
 **pgRouting** (handles uphill vs downhill costs, same database as everything else). Considered and rejected for now: `skimage.graph.MCP_Geometric` (can't make uphill cost more than downhill), GRASS `r.walk` (good but a heavy extra tool).
 
+**Simpler option to consider:** `build_graph.py` already holds the whole graph in numpy, and `scipy.sparse.csgraph.dijkstra` handles directed costs (uphill ≠ downhill, unlike skimage). It runs in milliseconds in memory, and blocking fire = set those edge costs to infinity on a copy. PostGIS would still hold the rasters and vectors for the map and SQL queries. For a 40k-node demo this is likely faster and simpler than pgRouting (pgRouting on the Pi not yet timed). **Team to decide.**
+
 ---
 
 ## 5. Margin engine
@@ -313,10 +401,10 @@ Endpoints outside the DEM give NULL dz, so check `WHERE cost IS NULL` after load
 Every recompute:
 1. Pull the latest reading per node and the active fire points. **A stale node (§5.1) is not skipped: the engine uses worst-case values for it** (§5.3).
 2. Build one pyrothermel run per fire point (fuel/slope/aspect at that point, current wind and moisture).
-3. Run Dijkstra from the crew to each target. That gives `t_crew(i)` for every node `i` on each route.
+3. Run Dijkstra from the crew to **every** node, with no fire blocking (`pgr_drivingDistance` or one-to-all). That gives `t_crew(i)` for every node `i`.
 4. For every route node: `t_fire(i) = min over fire points of arrival_min(...) / safety_factor`.
 5. `margin(route) = min_i ( t_fire(i) − t_crew(i) )`. The safety zone itself is one of the nodes.
-6. **Reroute:** mark edges where `t_fire < t_crew` (plus the flame-distance buffer) as impassable, then run Dijkstra again. The surviving cheapest path becomes the active escape route.
+6. **Reroute:** mark edges where `t_fire < t_crew` (plus the flame-distance buffer) as impassable, then run Dijkstra again. The surviving cheapest path becomes the active escape route. Mechanics in §5.4.
 7. **Leave-by time** (dynamic trigger) = `now + margin − buffer`. Show it as a countdown.
 8. Publish the result (routes with margin/colour, fire points, node health) to MQTT `engine/state`; `ws_server.py` forwards it to the dashboard.
 
@@ -346,6 +434,35 @@ Why: skipping a silent node lets the margin stay green on old data, the same fai
 | Wind direction | Unknown → assume toward each route point, i.e. head-fire rate in every direction (a circle of radius head ROS) |
 | Temp / RH | Highest recent temp and lowest recent RH, or fixed limits `WORST_TEMP_C` / `WORST_RH` |
 
+### 5.4 How the fire is applied to routing (graph fixed, closures change)
+Like a road map with some roads closed today: the map stays the same, the route-finder just skips the closed roads.
+- **Fixed, built once:** `edges` (grid + trails + connectors, §4.1), every possible step with its walking time.
+- **Changes every recompute:** `fire_blocked(id)`, the short list of edge ids that are unsafe right now. `TRUNCATE` + `INSERT` each time; `edges` is never touched. Rebuilding 160k edges every few seconds would be slow; changing a short list is not.
+
+`pgr_dijkstra` takes an **SQL query that returns the edges**, so the closures are applied while the edges are read:
+```sql
+SELECT * FROM pgr_dijkstra(
+  'SELECT e.id, e.source, e.target,
+          CASE WHEN b.id IS NOT NULL THEN -1 ELSE e.cost         END AS cost,
+          CASE WHEN b.id IS NOT NULL THEN -1 ELSE e.reverse_cost END AS reverse_cost
+   FROM edges e LEFT JOIN fire_blocked b USING (id)',
+  crew_node, ARRAY[<safety zone nodes>]);
+```
+- `LEFT JOIN` keeps **every** edge; only edges in `fire_blocked` find a match.
+- `CASE … -1`: a blocked edge gets cost −1, which pgRouting treats as "doesn't exist". **Blank both `cost` and `reverse_cost`.**
+- `crew_node` = crew position snapped to the nearest node; the array = every safety zone and vehicle, snapped the same way. A path comes back for each; the fastest wins.
+
+**Order each recompute** (crew times are needed before edges can be blocked):
+1. `t_crew` per node: crew → every node, no blocking.
+2. `t_fire` per node: fire model (§2.4) ÷ safety factor.
+3. Block an edge if either end has `t_fire < t_crew`, or lies within 4 × flame length of the projected front → `fire_blocked`.
+4. Route with the query above. Margin = smallest `t_fire − t_crew` along the chosen path.
+5. A detour reaches later points later, so repeat 3–4 on the new route once or twice until it stops changing. **No path left → red "no safe route" alert.**
+
+**Example:** crew at A, safety zone Z; route 1 over the ridge, route 2 down a drainage. 14:00: nothing blocked, route 1, margin 9 min → green. 14:05: wind shift; the ridge burns in 6 min but the crew needs 8 → ridge edges into `fire_blocked`; Dijkstra picks route 2, margin 4 min → **amber, rerouted, alert**. That is the demo moment (fan on → route flips).
+
+**With scipy instead** (§4.6): same logic, copy the cost array, set blocked edges to infinity, run `dijkstra`.
+
 ---
 
 ## 6. Data model (PostGIS database `fire` on the Pi)
@@ -353,7 +470,9 @@ Why: skipping a silent node lets the margin stay green on old data, the same fai
 - `readings(...)`: one row per `wx` message plus the Pi's receive time. **Columns not fixed yet** (`ingest.py` defines them)
 - `fire_points(...)`: from `sensors/<src>/fire`
 - `trails(..., dz, cost, reverse_cost, scouted bool, no_go bool)`
-- `grid_edges(id, source, target, cost, reverse_cost, geom)`, built in Python from the rasters
+- `grid_nodes(id, row, col, geom, elev, veg_factor)` and `grid_edges(id, source, target, cost, reverse_cost, geom)`, built in Python from the rasters (§4.1)
+- `fire_blocked(id)`: edge ids closed by the fire, rewritten every recompute (§5.4)
+- `evc`, `evh` rasters (or just `veg_factor` on `grid_nodes`)
 - `dem`, `slope`, `aspect`, `fuel` raster tables (EPSG:32612)
 - `safety_zones(id, geom, radius_m)`; the radius is checked against 4 × flame height
 
@@ -550,9 +669,10 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 **Next steps**
 - [x] ESP32-S3 node: on FireNet, publishing heartbeats (as `N2`, verified Sat Nov 7)
 - [x] ESP32-C5 node `N3`: PlatformIO setup, on FireNet, heartbeats on the Pi broker (verified Sat Nov 7)
-- [x] N3: DHT11 read (new sensor + open-drain driver), real `temp_c`/`rh` on the Pi broker (verified Sat Nov 7, §8.3.2)
-- [ ] N3: optional: faster Wi-Fi rejoin after reboot (~40 s now) so N3 doesn't grey out on the Pi
-- [ ] Backend: fix the readings-dropped-after-reboot issue and the `receive()` log noise (§1.2.1 known issues)
+DHT11: keep upstream’s line. It’s done and verified, so your “fix wiring” item is out of date.
+Wi-Fi rejoin: keep it. Only upstream has it.
+Backend reboot fix: keep your checked [x]. Upstream still shows it as open.
+Real node data: keep it. Only your stash has it.
 - [ ] N1 (La Crosse): fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
 - [x] Local PostGIS schema + `ingest.py` (MQTT → database) implemented and verified with simulator data
 - [x] `ws_server.py` working locally against the simulator; latest-message HTTP cache verified
@@ -561,7 +681,8 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - [ ] Decide the tabletop ↔ UTM transform (§1.4)
 - [ ] Trail graph for the tabletop in PostGIS + pgRouting, then the margin engine
 - [ ] Build pyrothermel on the Pi 5
-- [ ] Download LANDFIRE (FBFM40, elevation, slope, aspect) + 3DEP 10 m DEM for the chosen Yarnell patch; reproject to EPSG:32612; load into PostGIS
+- [x] Download LANDFIRE + 3DEP DEM for the Yarnell patch, reproject to EPSG:32612 (§3.1)
+- [ ] Yarnell data follow-ups: ranch/route/wind timeline from the report, travel factor from EVC/EVH, load into PostGIS (§3.2)
 - [ ] RH/temp → 1-h fuel moisture table
 - [ ] Grab the thermal camera, LoRa modules and ESP32s from the shared library
 - [ ] Questions for the operator mentor: travel speed in chaparral vs trail, acceptable margin thresholds, a quote for the pitch
@@ -586,6 +707,7 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - ESP32 serial port "busy" / "could not exclusively lock": an old PlatformIO monitor still holds it. Ctrl+C every old *Upload and Monitor* terminal first (§8.3.2).
 - `mosquitto_sub` looks stuck when nothing is publishing; it is just waiting (Ctrl+C to stop).
 - paho-mqtt 2.x needs `mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)`.
+- `docs/USGS_13_n35w113.tif` is 440 MB: don't commit it (move to `data/raw/`, gitignore).
 - SDR: only one program can hold the dongle (`usb_claim_interface error -6`); the La Crosse id changes on battery swap (§1.3).
 
 ---

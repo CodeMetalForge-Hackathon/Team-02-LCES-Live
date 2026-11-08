@@ -8,3 +8,7 @@ __pycache__/
 .env
 # Node
 node_modules/
+# Large downloads: keep out of git
+docs/*.tif
+docs/*.pdf
+data/*.zip

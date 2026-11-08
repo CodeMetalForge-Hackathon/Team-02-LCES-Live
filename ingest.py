@@ -53,8 +53,7 @@ def save_reading(topic: str, data: dict) -> None:
             )
             cur.execute(
                 "INSERT INTO readings (node_id, seq, temp_c, rh, wind_ms, wind_dir, flame, batt, raw) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
-                "ON CONFLICT (node_id, seq) DO NOTHING",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
                 values,
             )
     print(f"Saved {node_id} seq={seq}")
@@ -71,6 +70,8 @@ def on_connect(client, userdata, flags, reason_code, properties):
 def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload)
+        if not isinstance(data, dict):
+            raise ValueError("payload must be a JSON object")
         if data.get("_simulated") and not ALLOW_SIMULATOR_DATA:
             return
         save_reading(msg.topic, data)

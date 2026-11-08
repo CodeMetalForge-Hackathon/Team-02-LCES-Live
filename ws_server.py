@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
         except (UnicodeDecodeError, json.JSONDecodeError):
             print(f"Ignoring invalid JSON on {msg.topic}")
             return
+        if not isinstance(data, dict):
+            print(f"Ignoring non-object JSON on {msg.topic}")
+            return
         if data.get("_simulated") and not ALLOW_SIMULATOR_DATA:
             return
         loop.call_soon_threadsafe(enqueue, {"topic": msg.topic, "rx_ts": time.time(), "data": data})
@@ -96,7 +99,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         for item in latest.values():
             await websocket.send_json(item)
         while True:
-            await websocket.receive()
+            await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:

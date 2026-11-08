@@ -21,9 +21,11 @@ CREATE TABLE IF NOT EXISTS readings (
     flame INTEGER,
     batt DOUBLE PRECISION,
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    raw JSONB NOT NULL,
-    UNIQUE (node_id, seq)
+    raw JSONB NOT NULL
 );
+
+-- seq restarts at 0 when a node reboots, so (node_id, seq) is not unique.
+ALTER TABLE readings DROP CONSTRAINT IF EXISTS readings_node_id_seq_key;
 
 CREATE INDEX IF NOT EXISTS readings_node_time_idx
     ON readings (node_id, received_at DESC);
