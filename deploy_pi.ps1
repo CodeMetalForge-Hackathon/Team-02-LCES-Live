@@ -36,8 +36,8 @@ if ($LASTEXITCODE -ne 0) { throw "Could not create the deployment directory on t
 
 $rootFiles = @(
     "config.py", "engine.py", "fire_model.py", "margin.py", "ingest.py", "ws_server.py",
-    "simulator.py", "build_graph.py", "test_margin.py", "pyproject.toml", "uv.lock",
-    "schema.sql", "run_live.sh", "mosquitto.conf", ".env.example"
+    "simulator.py", "build_graph.py", "test_margin.py", "pyproject.toml", "uv.lock", ".python-version",
+    "schema.sql", "load_static.py", "run_live.sh", "mosquitto.conf", ".env.example"
 ) | ForEach-Object { Join-Path $projectRoot $_ }
 
 Write-Host "Copying application source, dashboard build, and Yarnell data to the Pi..."
@@ -54,15 +54,19 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not $SkipDependencySync) {
     Write-Host "Syncing Pi Python environment from its local uv cache only..."
-    & ssh $target "cd '$RemotePath' && uv sync --offline --group engine"
+    & ssh $target "cd '$RemotePath' && uv sync --offline --locked"
     if ($LASTEXITCODE -ne 0) {
-        throw "Pi dependency sync failed offline. Connect the Pi to internet once and run: cd $RemotePath && uv sync --group engine. Then reconnect FireNet and rerun this script."
+        throw "Pi dependency sync failed offline. Connect the Pi to internet once and run: cd $RemotePath && uv sync --locked. Then reconnect FireNet and rerun this script."
     }
 }
 
 Write-Host "Applying schema to the Pi database..."
 & ssh $target "cd '$RemotePath' && set -a && . ./.env && set +a && psql `"`$DATABASE_URL`" -v ON_ERROR_STOP=1 -f schema.sql"
 if ($LASTEXITCODE -ne 0) { throw "Schema application failed; services were not started." }
+
+Write-Host "Loading static Yarnell layers (rasters, perimeter, sites, scenario, OSM, node positions) into PostGIS..."
+& ssh $target "cd '$RemotePath' && env UV_OFFLINE=1 uv run python load_static.py"
+if ($LASTEXITCODE -ne 0) { throw "Static data load failed; services were not started. See the message above (postgis_raster may need enabling once)." }
 
 Write-Host "Starting ingestion, WebSocket/dashboard, and margin engine on the Pi..."
 $start = "cd '$RemotePath' && mkdir -p logs && (test -f logs/live.pid && kill `$(cat logs/live.pid) 2>/dev/null || true) && (test -f logs/engine.pid && kill `$(cat logs/engine.pid) 2>/dev/null || true) && (nohup env UV_OFFLINE=1 bash run_live.sh > logs/live.log 2>&1 < /dev/null & echo `$! > logs/live.pid) && (nohup env UV_OFFLINE=1 uv run --group engine python engine.py > logs/engine.log 2>&1 < /dev/null & echo `$! > logs/engine.pid)"

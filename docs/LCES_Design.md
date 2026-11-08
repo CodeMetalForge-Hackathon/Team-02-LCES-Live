@@ -141,7 +141,7 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 - **Sensor id changes when the batteries come out.** Run plain `rtl_433 -f 433.92M -R 73 -F json`, read the new `id`, update `SENSOR_ID`. The sensor sends a burst right after battery insertion.
 - **Direction depends on mounting:** the vane reads relative to the housing. The label says the solar panel must face **south**. On the floor, either face it to real south or set `DIR_OFFSET` (mark north on the floor; the fan's direction must match compass directions).
 - The Python MQTT library (`python3-paho-mqtt`) must be installed before joining FireNet, which has no internet.
-- For the demo, plan to move the SDR to the Pi (install `rtl-433` while the Pi still has internet, copy `wind_bridge.py` to `~/fire`, run with `uv run python wind_bridge.py`; default `MQTT_HOST=localhost`). **Not done yet.**
+- **Decided Nov 8: the SDR stays on a laptop** on FireNet for the demo (not moved to the Pi); it publishes to the Pi broker with `MQTT_HOST=10.42.1.1` as above.
 
 **Still to verify**
 - [ ] Fan test: blow from a known compass direction and confirm `wind_dir` = direction the wind comes **from** (§2.2 relies on this). Set `DIR_OFFSET` if needed.
@@ -194,12 +194,32 @@ Outputs (metric): `spread_rate` (km/h), `direction` (compass bearing of the head
 ### 2.4 Fire arrival time per cell (minimum travel time, decided Nov 8, ADR 0002)
 The fire **keeps its history**, so a wind shift turns the fire from where it already reached (the point of the demo). Finney (2002) minimum travel time on the same 10 m grid as the crew routing:
 - **State:** one fire arrival time per cell, stored as a **clock time** (`inf` = not reached).
-- **Start:** cells inside **the black** polygon (~16:00 burned area, hand-drawn from the SAIT maps) are reached at scenario start; its edge is the first fire front. New fire points set their cell to their ignition time. No separate main-fire points.
+- **Start:** cells inside the **fire area at 16:15** (`scenario.geojson`, traced from the SAIT overview slides) are reached at scenario start and are the black. Only `front0` spreads: ground burned 16:00–16:15 (the north strip of the routing area). The west edge by the lunch spot held since 16:00 and is cold (changed Nov 8, was: the whole edge of the Fig. 22 black). New fire points set their cell to their ignition time. No separate main-fire points.
 - **Each recompute:** cells with arrival ≤ now are fixed. Run scipy Dijkstra (multi-source) from the fire front over the unreached cells; step time = step length / rate of spread in that step's direction under **current** wind and moisture. Those times become the new arrival times.
 - **Rate of spread:** pyrothermel `run_surface_fire_in_direction_of_interest`, **cached by (fuel, slope band, aspect band, step direction)** per recompute: a few hundred calls instead of 40k × 8.
 - **Cell states:** reached > `BURNOUT_MIN` (5 min) ago = **the black** (safe); reached within the last 5 min = **burning** (impassable); not reached = unburned.
 - Divide the time **until** arrival (arrival − now) by the **safety factor (1.5)** before comparing with crew times. Show the unfactored value as the uncertainty band.
 - Model assumptions to state openly: constant conditions between recomputes, no spotting, no terrain wind channeling, one wind for the whole area.
+- **Implemented (Nov 8):** `margin.FireGrid`; details and numbers in §5.6 ("Update Nov 8, fire spread" and "Start state from the overview slides").
+
+**How it differs from v1 (straight lines, §5.6):**
+
+| | v1: straight lines from each fire point | Grid (`FireGrid`) |
+|---|---|---|
+| Path | Straight line fire point → route point | Fastest fire path cell to cell (Dijkstra), goes around obstacles |
+| Fuel, slope, aspect | The fire point's own cell, applied all the way out | Each 10 m step uses the cell it is in (faster upslope/downwind, slower backing) |
+| Non-burnable cells | Only if the fire point itself is non-burnable | Stop the fire wherever they are |
+| Wind shift | Redrawn as if the new wind had always blown | History kept: reached cells keep their times; the fire turns from where it is |
+| Start | Spot fires only; the black doesn't spread | Fire area at 16:15; its live front (`front0`) spreads |
+| Flame buffer | One head flame length for the whole fire | Per cell, the flame in the direction the fire reached it (backing ~5 m, head ~25 m) |
+
+**Model vs the 2013 slides:** from 16:15 with wind from 20° at 7.5 m/s the front covers ~1 km in ~20 min; the slides show ~1 km by 16:40 (IoU ≈ 0.55 with the traced 16:40 area), but the model runs ahead of the 16:30 slide. Why:
+- The wind is constant and instant; in 2013 it swung 180° over about an hour, so the test front-loads the outflow.
+- Rough weather inputs: one wind for the whole area and very dry fuel (32 °C / 15 % RH → ~3 % 1-h moisture) make pyrothermel fast in SH5.
+- The slide fire areas are estimates: edges ~30–60 m, traced areas ~85 % of the stated acreage (scale bar vs site markers disagree).
+- Not modelled: spotting, terrain channelling of the wind, suppression (retardant on the north end).
+
+So the timing is in the right range, not exact; the 1.5 safety factor on the margin is meant to cover this.
 
 ### 2.5 Extra outputs used for alerts
 | Use | Rule | Source |
@@ -270,7 +290,7 @@ The ordered plan is in §9 (Map + routing track); this list keeps the data-speci
   - **The black:** > 400 acres next to the crew (p.17, p.35). Vehicles moved to the Shrine area ~15:55 (p.24).
 - [x] Hand-draw **the black at ~16:00** (polygon) and the **2013 descent line** (reference layer) from the report maps → `data/yarnell/scenario.geojson`.
 - [x] Choose the 2 km × 2 km routing crop and each node's fake GPS position (§1.4).
-- [ ] Load rasters (`raster2pgsql`, ships with PostGIS on the Pi) and GeoJSON (`ogr2ogr`, or psycopg + `ST_GeomFromGeoJSON`) into PostGIS.
+- [x] Load rasters and GeoJSON into PostGIS: `load_static.py` (Nov 8). Rasters `dem`/`slope`/`aspect`/`fuel` via `raster2pgsql` (100 × 100 tiles); `perimeter`/`sites`/`scenario`/`osm` into one `static_features(layer, name, props, geom)` table; `nodes.geom` from `nodes.json`; all EPSG:32612. Rerunnable; no GDAL/`ogr2ogr` needed. One-time superuser step: `CREATE EXTENSION postgis_raster`. `deploy_pi.ps1` runs it after the schema. Tested on PostGIS 3.6 as a non-superuser.
 - [ ] SH5 override inside the perimeter for the 2013 replay (one flag in `config.py`).
 - [ ] Optional: offline street basemap (PMTiles); 1 m lidar hillshade.
 
@@ -419,7 +439,7 @@ Every recompute (on each incoming message, and at least every 5 s):
 9. **Leave-by time** = `now + margin − buffer`, shown as a countdown.
 10. Publish `engine/state` (§5.5); `ws_server.py` forwards it to the dashboard.
 
-**Demo story:** scenario starts 16:20, crew at the saddle, the black behind them. Fan on (the outflow) → fire turns south toward the box canyon → the ranch route goes red → reroute: back to the black. The simulated crew keeps walking the 2013 line (§1.4), so the margin keeps falling on the path the real crew took.
+**Demo story (revised Nov 8, close to 2013):** scenario starts 16:20, crew at the saddle heading for the ranch, the black ~19 min behind them. Wind from the SSW (as until ~16:00) pushes the fire NE: both routes green. Fan on (the outflow; in 2013 the wind swung 180° to NNE within the hour) → the front north of the crew runs south → `ranch` red, then `black` red → "no safe route". No reroute: from the saddle the outflow cuts both. The simulated crew keeps walking the 2013 line (§1.4), so the margin keeps falling on the path the real crew took.
 
 ### 5.1 Thresholds (defaults, in `config.py`)
 | Status | Rule |
@@ -476,6 +496,10 @@ Built before the Nov 8 v2 design (§2.4, §4.6, ADR 0001/0002) and runnable toda
 - The demo follows the spec story in its order (fan on N1 turns the fire from the black's edge → ranch red → reroute to the black; then hair dryer on N2; then unplug N3). v1 can't do this: it has no fire from the black, only spot fires. With the real N2 (box canyon, on the descent line), a spot fire at N2 or N3 turns `ranch` red at once whatever the wind (checked: N2, wind 270° → `ranch` −26 min, 180° → −17 min; `black` stays green). The hair dryer beat never replaces the fan beat.
 - Needed for the demo: fire spread from the black (§2.4, ADR 0002), then closures + the reroute loop (§5.4).
 - **Update Nov 8, later:** `black0` is in `graph.npz` and the engine now routes over it when `data/yarnell/graph.npz` exists (§9 track 8b). Crew times along a route are the graph's own step times, so the blended `travel_factor` flaw of `routes.geojson` is gone in this mode. Each route in `engine/state` has `path`. Fire is still v1 (straight-line spread from spot fires); with a spot fire at N2, wind 270° at 7.5 m/s: `ranch` margin −25.3 min red (ETA 28.1; fire reaches the ranch end at 2.8 min), `black` margin +53.9 min green (ETA 18.8; worst point is the crew's own cell, fire there at 53.9 min). The 2.8 min over ~740 m (≈ 260 m/min, incl. the 1.5 safety factor and the 4 × flame buffer) is v1's straight-line spread; don't quote it, task 8c replaces it. `routes.geojson` + `load_routes` remain only as the no-graph fallback (and `test_margin.py`'s placeholder checks).
+- **Update Nov 8, fire spread (§9 track 8c):** `margin.FireGrid` (graph mode). Arrival clock time per grid cell; `black0` reached at engine start / reset (16:20), counted as black; each recompute keeps cells reached by now and spreads from them by Dijkstra (one virtual source, edges weighted by each front cell's arrival time) over 8-neighbour grid edges between burnable cells. Rate of spread and flame length per (fuel, 5° slope band, 22.5° aspect band) × 8 directions from pyrothermel: 253 cell types, rebuilt only when the weather changes (~250 ms; ~25 ms otherwise). Each cell keeps the flame length in the direction the fire reached it (backing fires ~5 m, head ~25 m), and a cell is unsafe from the moment it lies within 4 × that flame of a burning cell (square window, conservative). Spot fires ignite their cell and the burnable cells around it at their detection time. Arrival times are unfactored; the margin divides (unsafe − now) by the 1.5 safety factor (§2.4). Checks: downwind < flank < upwind, wind shift keeps history and turns from the reached tongue, non-burnable wall never crossed, burning 5 min then black, engine spreads from the black + spot fire + reset (`test_margin.py`, 21 pass).
+  **Start state from the overview slides (Nov 8, later):** `docs/YarnellOverview.pdf` has estimated fire areas at 16:00, 16:15, 16:30, 16:40, 16:50 (p.17–23); traced by colour and georeferenced on the lunch spot / deployment site / ranch markers into `scenario.geojson` (`fire area HH:MM`; replaces the Fig. 22 "the black", which matched the 16:00 area to 13 cells). Areas come out ~85 % of the slide acreage (the slide scale bar disagrees with the markers by ~20 %; markers kept). In the routing area the fire at 16:15 is the lunch-spot corner (cold) plus a strip ~1 km north of the crew (live, `front0`, 983 cells); the slides show it running south over the descent point by 16:40. Model check: from 16:15 with wind from 20° at 7.5 m/s the front covers ~1 km in ~20 min (slides: ~1 km by 16:40); overlap with the traced 16:40 area IoU ≈ 0.55; the model runs ahead of the 16:30 slide.
+- **Update Nov 8, closures + reroute loop (§9 track 8d, §5 steps 3–7):** `margin.graph_routes(g, crew_xy, fire, now)`, called every recompute (no route cache). Crew Dijkstra with no closures → close every vertex (trail vertices via their cell) that is burning, within 4 × flame of burning, or reached by the fire (÷ 1.5) before the crew → Dijkstra again without those vertices → repeat until no new closures (they only grow; capped at 10). The `black` target is every cell black by now (`FireGrid.black(now)`), so it grows. A safety zone with no path left keeps its fire-blind path: it shows red with a negative margin and the existing all-red rule raises "NO SAFE ROUTE" (routes never disappear from `engine/state`). 2013 sweep, N1 7.5 m/s turning 10°/min from 200°: both green to 280°; `ranch` red at 290°; `black` amber at 330°, red at 340° → NO SAFE ROUTE; no detour appears from the saddle (fits the no-reroute story). The black route shortens as the black grows (18.8 → 16.2 min). 40–60 ms per recompute, ~270 ms when the weather changes (pyrothermel table rebuild). Checks: closures detour around a spot fire with margin ≥ 0 where the fire-blind route is negative; fire on the crew keeps both routes listed and red; the black target grows (`test_margin.py`, 24 pass).
+  **Results from the descent point:** calm 225° 2.5 m/s → `ranch` +35.5, `black` +18.2 (both green). Outflow from 0–20° at 4–13 m/s → `ranch` −11 to −26 (red) **and `black` −9 to −15 (red)**: the fire runs SSW along the black's south edge and reaches the black route's end 10–20 min after the shift, the crew needs 18.8 min. `black` stays green under the outflow only within ~6 min of the black (the first stretch of the 2013 walk, ~16:04–16:10). Decided: keep 16:20 and show "no safe route" (spec demo story). Engine run, N1 at 7.5 m/s turning 1 step per minute from 200° clockwise: 200° both green → 270° both green → 300° `ranch` red, `black` green → 330° `black` amber → 0° both red, NO SAFE ROUTE. Turning via east: `black` goes red first (at 90°), `ranch` at 20°. At engine start the active route is `black` (fastest non-red); the 2013 crew was heading to the ranch.
 
 | File | What it does |
 |---|---|
@@ -739,7 +763,7 @@ Verified Sat Nov 7: three N3 heartbeats arrived at the local broker 10 s apart. 
 
 ### 8.4 Simulator
 `~/fire/simulator.py` on the Pi pretends to be N1–N3, so backend and dashboard can be built before the hardware. Code in Appendix A. Every 10 s it publishes one heartbeat per node to `sensors/<node>/wx`, and acts out the two demo situations:
-- **Wind shift** after `--wind-shift-after` s: direction 270° → 180°, speed ~2 → 7.5 m/s, temp +4 °C, RH −5%.
+- **Wind shift** after `--wind-shift-after` s: direction 200° turning clockwise to 20° over `--turn-s` (was 270° → 180°), speed ~2 → 7.5 m/s, temp +4 °C, RH −5%.
 - **Silent node** after `--silent-after` s: `--silent-node` (default N3) stops sending.
 ```
 mosquitto_sub -h localhost -t 'sensors/#' -v
@@ -773,6 +797,8 @@ npm run build
 
 `ws_server.py` serves the generated `dashboard/dist` at `http://10.42.1.1:8000`; the same service provides the WebSocket at `/ws`. Do not commit `dashboard/dist`; build it on the Pi after `git pull`.
 
+**Integrated with the engine (Nov 8):** the map draws everything from `engine/state`: routes from each route's `path` (coloured by status, active one thicker), sensor nodes from `nodes` (fresh/aging/stale), spot fires, the crew, and the fire `areas` (black, burning, +5 / +10 min fronts; added to `engine/state` per §5.5 by `margin.fire_areas`, ~15 KB, ~30 ms). The hardcoded R1/R2 lines are gone. Reference layers: hillshade (corners from `meta.json`), 2013 final perimeter (dashed), 2013 descent line (dotted). Fixes: MapLibre v6 loads its worker from a separate file that the Vite build didn't ship, so no GeoJSON layer drew (now `setWorkerUrl` to the bundled worker); `package.json` pinned to exact versions (was `latest`); the WebSocket reconnects every 2 s. The engine's fire clock (16:20) now starts at the first sensor reading, not at engine start (it used to run on worst-case weather until the first reading and kept that history). Local run: `./run_demo.sh`. Simulator wind: `--dir-before 200` turning clockwise to `--dir-after 20` over `--turn-s` after `--wind-shift-after`.
+
 ---
 
 ## 9. Next steps, open questions, gotchas
@@ -804,7 +830,7 @@ npm run build
 5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
 6. [x] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
-8. [ ] **Margin engine (Person A joins Vivek here, Nov 8):** in order (a) ~~`black0` cells in `graph.npz`~~ done Nov 8 (2,581 cells; descent point → black0 18.8 min, asserted in `build_graph.py`); (b) ~~engine routes over `graph.npz`~~ done Nov 8: `margin.load_graph` / `GraphTerrain` (terrain/fuel from the graph, no "SH5 everywhere" override) / `graph_routes` (crew cell → `ranch` / `black0` with `route()`, `seg_s` = the graph's edge costs, re-planned when the crew changes cell), `path` per route in `engine/state`; checks in `test_margin.py` (16 pass); 8 ms per recompute, 35 ms with a re-plan; (c) fire spread from the black over the grid (§2.4); (d) closures + reroute loop (§5.4); (e) `engine/state` per §5.5, with the fire and margin checks in §7. v1 (§5.6) is for testing only; `routes.geojson` (`build_graph.py --routes`) feeds it meanwhile.
+8. [ ] **Margin engine (Person A joins Vivek here, Nov 8):** in order (a) ~~`black0` cells in `graph.npz`~~ done Nov 8 (2,581 cells; descent point → black0 18.8 min, asserted in `build_graph.py`); (b) ~~engine routes over `graph.npz`~~ done Nov 8: `margin.load_graph` / `GraphTerrain` (terrain/fuel from the graph, no "SH5 everywhere" override) / `graph_routes` (crew cell → `ranch` / `black0` with `route()`, `seg_s` = the graph's edge costs, re-planned when the crew changes cell), `path` per route in `engine/state`; checks in `test_margin.py` (16 pass); 8 ms per recompute, 35 ms with a re-plan; (c) ~~fire spread from the black over the grid (§2.4)~~ done Nov 8, two open questions (§5.6 "fire spread" update); (d) ~~closures + reroute loop (§5.4)~~ done Nov 8 (§5.6 "closures" update); (e) `engine/state` per §5.5, with the fire and margin checks in §7. v1 (§5.6) is for testing only; `routes.geojson` (`build_graph.py --routes`) feeds it meanwhile.
 9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
 10. [ ] **Scenario simulator:** publish the crew position walking the 2013 descent line from the descent point at 16:20, real time, ignoring reroutes (spec "Scenario simulator").
 

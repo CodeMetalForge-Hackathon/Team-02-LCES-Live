@@ -21,9 +21,8 @@ from dotenv import load_dotenv
 
 import config
 from fire_model import MODEL_NAME, Weather
-import build_graph
-from margin import (FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
-                    load_routes, spreads_for, status_for, to_lonlat, to_utm)
+from margin import (FireGrid, FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
+                    fire_areas, load_routes, spreads_for, status_for, to_lonlat, to_utm, v1_fire_min)
 
 MISSING = {-1, -99}
 
@@ -66,7 +65,8 @@ class MarginEngine:
                  graph: dict | None = None):
         """graph: routing graph (margin.load_graph); routes are then re-planned from the crew's cell."""
         self.terrain, self.routes, self.nodes, self.placeholder = terrain, routes, nodes, placeholder
-        self.graph, self._routes_cell = graph, None
+        self.graph = graph
+        self.fire: FireGrid | None = None                    # graph mode: created at the first compute / reset
         self.latest: dict[str, tuple[dict, float]] = {}      # node -> (last wx message, rx time)
         self.fires: list[FirePoint] = []
         self.start_xy = self.crew_xy = tuple(routes[0].xy[0])   # default: start of the first route
@@ -119,6 +119,7 @@ class MarginEngine:
         cmd = data.get("cmd")
         if cmd == "reset":
             self.fires.clear()
+            self.fire = None                                 # the black back to 16:00, clock restarts
             self.active = None
             self.crew_xy = self.start_xy
             for h in self.history.values():
@@ -207,13 +208,19 @@ class MarginEngine:
                 self.event(now, f"Node {nid} stale (no data for {config.STALE_S} s): using worst-case values")
             self.prev_node_status[nid] = status
 
-        if self.graph is not None:
-            c = build_graph.cell(self.graph, *self.crew_xy)
-            if c != self._routes_cell:                       # re-plan only when the crew changes cell
-                self.routes, self._routes_cell = graph_routes(self.graph, self.crew_xy), c
         wx, wx_notes = self.weather(health)
         spreads = spreads_for(self.fires, wx, self.terrain)
-        results = evaluate(self.routes, spreads, self.crew_xy, now)
+        if self.graph is not None and (self.fire is not None or self.latest):
+            if self.fire is None:   # scenario start (16:20) = first sensor reading after engine start or reset
+                self.fire = FireGrid(self.graph, now)
+            self.fire.advance(now, wx, [(f.x, f.y, f.t0) for f in self.fires])
+            self.routes = graph_routes(self.graph, self.crew_xy, self.fire, now)   # closures change every step
+            fire_min = self.fire.fire_min(now)
+            max_flame = float(self.fire.flame[self.fire.burning(now)].max(initial=0.0))
+        else:
+            fire_min = v1_fire_min(spreads, now)
+            max_flame = max((sp.flame_m for _, sp in spreads if math.isfinite(sp.flame_m)), default=0.0)
+        results = evaluate(self.routes, fire_min, self.crew_xy)
         by_id = {r.route.id: r for r in results}
         status = {r.route.id: self._route_status(r.route.id, r.margin_min, now) for r in results}
         for rid, s in status.items():
@@ -248,16 +255,17 @@ class MarginEngine:
             leave_by = now + (active.margin_min - config.LEAVE_BUFFER_MIN) * 60
             if leave_by <= now:
                 alerts.append(f"LEAVE NOW on {self.active}")
-        max_flame = max((sp.flame_m for _, sp in spreads if math.isfinite(sp.flame_m)), default=0.0)
         r_sz = active.route.sz_radius_m
-        if r_sz is not None and spreads and r_sz < config.SEPARATION_FLAME_MULT * max_flame:
+        if r_sz is not None and max_flame > 0 and r_sz < config.SEPARATION_FLAME_MULT * max_flame:
             alerts.append(f"Safety zone '{active.route.to}' too small: radius {r_sz:.0f} m < "
                           f"{config.SEPARATION_FLAME_MULT:g} x flame {max_flame:.1f} m")
         while self.events and now - self.events[0][0] > config.ALERT_HOLD_S:
             self.events.popleft()
         alerts += [text for _, text in self.events]
 
-        return self.build_state(now, health, wx, wx_notes, spreads, results, status, alerts, leave_by)
+        state = self.build_state(now, health, wx, wx_notes, spreads, results, status, alerts, leave_by)
+        state["areas"] = fire_areas(self.fire, now) if self.fire is not None else None
+        return state
 
     def build_state(self, now, health, wx, wx_notes, spreads, results, status, alerts, leave_by) -> dict:
         def r1(v):

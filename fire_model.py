@@ -67,7 +67,7 @@ class Spread:
         self.head_m_min = 0.0
         self.head_dir = None
         self.flame_m = 0.0
-        self._cache: dict[int, float] = {}
+        self._cache: dict[int, dict] = {}
         if not self.burnable:
             return
         if HAVE_PYROTHERMEL:
@@ -93,17 +93,25 @@ class Spread:
             self._ecc = math.sqrt(1 - 1 / lb ** 2)
             self.flame_m = float("nan")                       # not modelled by the fallback
 
+    def _toward(self, bearing_deg: float) -> dict:
+        key = round(bearing_deg) % 360              # 1-degree cache: Behave re-runs on every call
+        if key not in self._cache:
+            self._cache[key] = self._run.run_surface_fire_in_direction_of_interest(float(key))
+        return self._cache[key]
+
+    def flame_toward_m(self, bearing_deg: float) -> float:
+        """Flame length of the fire spreading in this direction (backing fires are shorter)."""
+        if not self.burnable or self.omni or not HAVE_PYROTHERMEL:
+            return self.flame_m
+        return self._toward(bearing_deg)["flame_length"]
+
     def ros_m_min(self, bearing_deg: float) -> float:
         if not self.burnable:
             return 0.0
         if self.omni:
             return self.head_m_min
         if HAVE_PYROTHERMEL:
-            key = round(bearing_deg) % 360          # 1-degree cache: Behave re-runs on every call
-            if key not in self._cache:
-                r = self._run.run_surface_fire_in_direction_of_interest(float(key))
-                self._cache[key] = r["spread_rate"] * 1000 / 60
-            return self._cache[key]
+            return self._toward(bearing_deg)["spread_rate"] * 1000 / 60
         theta = math.radians(bearing_deg - self.head_dir)
         return self.head_m_min * (1 - self._ecc) / (1 - self._ecc * math.cos(theta))
 

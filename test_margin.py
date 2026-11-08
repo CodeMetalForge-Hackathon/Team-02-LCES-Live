@@ -16,8 +16,8 @@ from engine import MarginEngine, load_nodes
 from fire_model import Spread, Weather, arrival_min, one_hour_moisture
 import build_graph
 import numpy as np
-from margin import (FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
-                    load_routes, spreads_for, tobler_kmh, to_lonlat)
+from margin import (FireGrid, FirePoint, GraphTerrain, Terrain, crew_start_xy, evaluate, graph_routes, load_graph,
+                    load_routes, spreads_for, tobler_kmh, to_lonlat, v1_fire_min)
 
 TERRAIN = Terrain()
 NODES_FILE = config.PLACEHOLDER_DIR / "nodes.json"
@@ -121,7 +121,7 @@ def test_route_cut_midway_is_red_even_if_safety_zone_reachable():
     # Fire 150 m west of R1's middle, wind from the west: the head runs across the middle.
     fx, fy = r1.xy[mid][0] - 150, r1.xy[mid][1]
     sp = spreads_for([FirePoint("F", fx, fy, 0.0, "test")], Weather(5.0, 270, 32, 15), TERRAIN)
-    [res] = evaluate([r1], sp, r1.xy[0], 0.0)
+    [res] = evaluate([r1], v1_fire_min(sp, 0.0), r1.xy[0])
     assert res.margin_min < config.RED_MIN                    # red
     assert 0 < res.worst < len(r1.xy) - 1                     # the worst point is mid-route, not the SZ
     _, t_crew_s = r1.crew_seconds(r1.xy[0])
@@ -228,6 +228,133 @@ def test_graph_terrain_keeps_lf2025_fuel_outside_the_perimeter():
     r, c = np.argwhere(burnable_other)[0]
     x, y = GRAPH["x"][r * fuel.shape[1] + c], GRAPH["y"][r * fuel.shape[1] + c]
     assert t.fuel(x, y) == fuel[r, c] != config.REPLAY_FUEL    # no "SH5 everywhere" override
+
+
+# ---- fire spread over the grid (§2.4, §7 "Fire spread", ADR 0002) ---------------------------
+def flat_fire(wall_col=None, n=41):
+    """Flat SH5 grid, 10 m cells, the black = the centre cell, scenario start t = 0."""
+    fuel = np.full((n, n), config.REPLAY_FUEL)
+    if wall_col is not None:
+        fuel[:, wall_col] = 99
+    g = dict(shape=np.array([n, n]), res=10.0, x0=0.0, ytop=n * 10.0, fuel=fuel,
+             slope=np.zeros((n, n)), aspect=np.zeros((n, n)), black0=np.array([n // 2 * n + n // 2]))
+    return FireGrid(g, 0.0), n
+
+
+def test_fire_downwind_cells_reached_before_upwind():
+    f, n = flat_fire()
+    f.advance(0, Weather(5.0, 270, 32, 15))                   # wind from the west
+    a = f.arrival.reshape(n, n)
+    c = n // 2
+    assert a[c, c + 15] < a[c + 15, c] < a[c, c - 15]          # downwind < flank < upwind
+    assert np.isfinite(a).all()
+
+
+def test_fire_wind_shift_turns_from_where_it_reached():
+    f, n = flat_fire()
+    f.advance(0, Weather(5.0, 270, 32, 15))
+    t_shift = float(np.sort(f.arrival)[int(n * n * 0.05)])     # ~5 % of the grid burned under the west wind
+    before = f.arrival.copy()
+    f.advance(t_shift, Weather(5.0, 0, 32, 15))               # wind now from the north
+    reached = before <= t_shift
+    assert (f.arrival[reached] == before[reached]).all()      # history kept
+    fresh, _ = flat_fire()
+    fresh.advance(0, Weather(5.0, 0, 32, 15))                 # as if the north wind had always blown
+    a, b, c = f.arrival.reshape(n, n), fresh.arrival.reshape(n, n), n // 2
+    # south of the east tongue: reached from the tongue, earlier than the fresh fire gets there
+    east = int(np.flatnonzero(reached.reshape(n, n)[c]).max())
+    assert east > c + 2 and a[n - 1, east] < b[n - 1, east]
+
+
+def test_fire_never_crosses_non_burnable_cells():
+    f, n = flat_fire(wall_col=30)
+    f.advance(0, Weather(13.0, 270, 40, 8))
+    a = f.arrival.reshape(n, n)
+    assert np.isinf(a[:, 30:]).all() and np.isfinite(a[:, :30]).all()
+
+
+def test_fire_cell_burns_for_5_min_then_black_and_flame_buffer_is_unsafe_first():
+    f, n = flat_fire()
+    f.advance(0, Weather(5.0, 270, 32, 15))
+    c = n // 2
+    cell = c * n + c + 5
+    t = f.arrival[cell]
+    assert f.burning(t + 1)[cell] and not f.black(t + 1)[cell]
+    assert f.black(t + config.BURNOUT_S + 1)[cell] and not f.burning(t + config.BURNOUT_S + 1)[cell]
+    unsafe = f.unsafe_at(0)
+    assert unsafe[cell] < t and np.isinf(unsafe[c * n + c])   # 4 x flame ahead of the front; the black is safe
+
+
+def test_graph_engine_spreads_from_the_black_and_ignites_spot_fires():
+    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, crew_start_xy()), load_nodes(config.NODES_FILE),
+                       graph=GRAPH)
+    feed(eng, 0, **CALM)
+    eng.compute(0)
+    reached0 = np.isfinite(eng.fire.arrival).sum()
+    assert reached0 > len(GRAPH["black0"])                     # predicted spread beyond the black
+    eng.on_cmd({"cmd": "fire", "node": "N2"}, 60)
+    s = eng.compute(60)
+    n2 = load_nodes(config.NODES_FILE)["N2"]
+    assert eng.fire.arrival[build_graph.cell(GRAPH, n2["x"], n2["y"])] == 60
+    assert eng.fire.burnable[np.isfinite(eng.fire.arrival)].all()          # non-burnable never burns
+    json.dumps(s, allow_nan=False)
+    assert s["areas"]["black"]["coordinates"] and s["areas"]["burning"]["coordinates"]   # map layers (§5.5)
+    eng.on_cmd({"cmd": "reset"}, 61)
+    eng.compute(61)
+    assert eng.fire.arrival[build_graph.cell(GRAPH, n2["x"], n2["y"])] > 61   # reset: the black at start again
+
+
+# ---- closures + reroute loop (§5 steps 3-7) ------------------------------------------------
+def flat_graph(n=41):
+    """Flat open SH5 grid, 10 m cells. Crew at the west edge, ranch at the east edge, black0 = NW corner (cold)."""
+    elev, slope, veg, blk = build_graph._flat(n, n)
+    g = build_graph.build(elev, slope, veg, blk, x0=0.0, ytop=n * 10.0)
+    c = n // 2
+    g.update(elev=elev, slope=slope, aspect=np.zeros((n, n)), veg=veg, fuel=np.full((n, n), config.REPLAY_FUEL),
+             ranch=np.array([c * n + n - 1]), black0=np.array([0]), front0=np.array([], int))
+    g["_m"] = build_graph.matrix(g)
+    g["_ok"] = np.bincount(g["src"], minlength=len(g["x"])) > 0
+    g["_cell"] = np.arange(n * n)
+    crew = (25.0, n * 10.0 - c * 10 - 5)                     # centre of cell (c, 2)
+    return g, n, crew
+
+
+def test_closures_route_around_the_fire_with_a_safe_margin():
+    g, n, crew = flat_graph()
+    f = FireGrid(g, 0.0)
+    f.advance(0, Weather(1.0, 0, 32, 15), fires=[(205.0, 205.0, 0.0)])   # spot fire mid-way, light north wind
+    blind = next(r for r in graph_routes(g, crew) if r.id == "ranch")
+    routed = next(r for r in graph_routes(g, crew, f, 0) if r.id == "ranch")
+    fire_min = f.fire_min(0)
+    m_blind, m_routed = evaluate([blind, routed], fire_min, crew)
+    assert m_blind.margin_min < 0                             # straight through the fire
+    assert m_routed.margin_min >= 0 and routed.seg_s.sum() > blind.seg_s.sum()   # detour, never into closed cells
+
+
+def test_no_path_left_keeps_the_route_red_and_the_black_grows():
+    g, n, crew = flat_graph()
+    f = FireGrid(g, 0.0)
+    f.advance(0, Weather(1.0, 0, 32, 15), fires=[(*crew, 0.0)])          # fire on the crew
+    rs = graph_routes(g, crew, f, 0)
+    assert {r.id for r in rs} == {"ranch", "black"}                       # both still shown ...
+    assert all(r.margin_min < config.RED_MIN for r in evaluate(rs, f.fire_min(0), crew))   # ... and red
+    late = float(f.arrival[np.isfinite(f.arrival)].max()) + config.BURNOUT_S + 60       # all burned out
+    black = next(r for r in graph_routes(g, crew, f, late) if r.id == "black")
+    assert black.seg_s.sum() < 60                             # the black is now right here, not the NW corner
+
+
+def test_graph_2013_story_ssw_green_then_nne_outflow_no_safe_route():
+    """Demo on the 2013 data (spec story): wind from the SSW -> both routes green; the outflow from the
+    NNE drives the front north of the crew south onto them -> both red, "no safe route"."""
+    eng = MarginEngine(GraphTerrain(GRAPH), graph_routes(GRAPH, crew_start_xy()), load_nodes(config.NODES_FILE),
+                       graph=GRAPH)
+    feed(eng, 0, wind_ms=2.5, wind_dir=200)
+    s = eng.compute(0)
+    assert all(r["status"] == "green" for r in s["routes"]), s["routes"]
+    feed(eng, 60, wind_ms=7.5, wind_dir=20)
+    s = eng.compute(60)
+    assert all(r["status"] == "red" for r in s["routes"]), s["routes"]
+    assert any(a.startswith("NO SAFE ROUTE") for a in s["alerts"])
 
 
 if __name__ == "__main__":

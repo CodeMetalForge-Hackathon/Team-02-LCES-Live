@@ -136,6 +136,11 @@ def matrix(g, closed=None):
 def route(g, start, targets, closed=None):
     """Fastest walk from `start` to any of `targets` -> (seconds, [vertex ids]); (inf, []) if none."""
     t, pred = dijkstra(matrix(g, closed), indices=start, return_predecessors=True)
+    return path_to(t, pred, start, targets)
+
+
+def path_to(t, pred, start, targets):
+    """From one Dijkstra run (times, predecessors): fastest path to any of `targets`."""
     targets = np.asarray(targets)
     end = targets[np.argmin(t[targets])]
     if not np.isfinite(t[end]):
@@ -226,7 +231,13 @@ def build_yarnell():
     n = CROP_CELLS * CROP_CELLS
     g["ranch"] = np.flatnonzero(np.hypot(g["x"][:n] - rx, g["y"][:n] - ry) <= RANCH_RADIUS_M)
     sc = {f["properties"]["name"]: f for f in json.loads((YARNELL / "scenario.geojson").read_text())["features"]}
-    g["black0"] = np.flatnonzero(burn([sc["the black"]["geometry"]]).ravel())  # the black at 16:00 (spec)
+    # Scenario start (16:20): the fire area at 16:15 has all burned > 5 min ago, so it is the black.
+    # Only ground burned 16:00-16:15 still spreads (the advancing front); edges that held since 16:00
+    # (west flank by the lunch spot) are cold. 3-cell margin absorbs tracing jitter between the slides.
+    from scipy.ndimage import binary_dilation
+    area = {t: burn([sc[f"fire area {t}"]["geometry"]]) for t in ("16:00", "16:15")}
+    g["black0"] = np.flatnonzero(area["16:15"].ravel())
+    g["front0"] = np.flatnonzero((area["16:15"] & ~binary_dilation(area["16:00"], iterations=3)).ravel())
     g.update(elev=elev, slope=slope, aspect=aspect, fuel=fuel, veg=veg, blocked=blocked)
     np.savez_compressed(YARNELL / "graph.npz", **g)
 
@@ -238,7 +249,7 @@ def build_yarnell():
     print(f"deployment site -> ranch: {t / 60:.1f} min over {len(path)} vertices")
     dx, dy = utm(*sc["Descent point (crew start)"]["geometry"]["coordinates"][::-1])
     t, _ = route(g, cell(g, dx, dy), g["black0"])
-    print(f"black0 cells {len(g['black0'])}; descent point -> black0: {t / 60:.1f} min")
+    print(f"black0 cells {len(g['black0'])} (front0 {len(g['front0'])}); descent point -> black0: {t / 60:.1f} min")
     assert len(g["black0"]) > 2000 and 15 < t / 60 < 22, (len(g["black0"]), t)
 
     # calibration print: the 2013 descent line walked at this veg factor (SAIT: ~20 min)
@@ -261,7 +272,7 @@ def export_routes():
     sc = {f["properties"]["name"]: f for f in json.loads((YARNELL / "scenario.geojson").read_text())["features"]}
     (sx,), (sy,) = transform("EPSG:4326", "EPSG:32612", *([c] for c in sc["Descent point (crew start)"]["geometry"]["coordinates"]))
     zones = [("ranch", "Boulder Springs Ranch", g["ranch"], RANCH_RADIUS_M),
-             ("black", "the black (16:00)", g["black0"], 500)]
+             ("black", "the black (16:15)", g["black0"], 500)]
     zg = np.concatenate([g["elev"].ravel(), [g["elev"].ravel()[cell(g, x, y)] for x, y in
                                              zip(g["x"][nr * nc:], g["y"][nr * nc:])]])
     feats = []

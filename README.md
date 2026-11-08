@@ -26,17 +26,25 @@ placeholders in `data/yarnell/placeholder/` and reports
 planned v2 engine: `docs/LCES_Design.md` §5.6.
 
 ```bash
-uv sync --group engine                        # once, needs internet (builds pyrothermel)
+uv sync --locked                              # once, needs internet; exact versions from uv.lock (Python 3.13, builds pyrothermel)
 uv run --group engine python test_margin.py   # 14 checks
 uv run --group engine python engine.py        # live; MQTT_HOST from .env
 ```
 
-Offline demo story against a local broker:
+Whole pipeline on one machine (Docker broker + engine + bridge + simulator), dashboard at
+http://127.0.0.1:8000: `./run_demo.sh` (simulator args pass through, e.g.
+`./run_demo.sh --wind-shift-after 45 --turn-s 150`; the wind turns from 200° to 20°, the 2013 outflow).
+
+Offline demo story against a local broker, by hand:
 
 ```bash
 uv run --group engine python engine.py --allow-sim
 uv run python simulator.py --fire-after 20 --wind-shift-after 60 --silent-after 90
 ```
+
+## Run on the Pi
+
+Setup, PostGIS data load, starting the services and opening the dashboard: `docs/pi-setup.md`.
 
 ## Test real sensor data from a laptop
 
@@ -137,7 +145,7 @@ that already has this repository and dependencies with the PowerShell helper:
 
 It builds the dashboard locally, copies the application and data to the Pi over
 SSH, preserves the Pi-only `.env`, applies `schema.sql`, and starts the live
-services. The Pi must have had `uv sync --group engine` run while it had internet
+services. The Pi must have had `uv sync --locked` run while it had internet
 access; the helper deliberately uses `uv sync --offline` on FireNet.
 
 Or, for separate logs/terminals, run `uv run python ingest.py` and `uv run

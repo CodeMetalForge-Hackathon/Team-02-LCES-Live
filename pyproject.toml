@@ -2,7 +2,7 @@
 name = "lces-live"
 version = "0.1.0"
 description = "LCES Live MQTT, WebSocket, and PostGIS services"
-requires-python = ">=3.11"
+requires-python = "==3.13.*"   # the Pi's Python (Debian 13); same everywhere so the lock matches
 dependencies = [
     "fastapi>=0.115",
     "paho-mqtt>=2.1",
@@ -15,6 +15,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+default-groups = ["engine"]   # plain `uv sync` installs the engine too (the Pi runs everything)
+# pyrothermel has no Linux/ARM wheel: it compiles from source. Pin its build tools too (uv.lock doesn't cover them).
+build-constraint-dependencies = ["scikit-build-core==1.1.2", "pybind11==3.1.0", "cmake==4.4.4"]
 
 [dependency-groups]
 engine = [

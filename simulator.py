@@ -10,6 +10,9 @@ import paho.mqtt.client as mqtt
 parser = argparse.ArgumentParser()
 parser.add_argument("--host", default="127.0.0.1")
 parser.add_argument("--wind-shift-after", type=int, default=60)
+parser.add_argument("--dir-before", type=float, default=200, help="wind from (deg) before the shift; 200 = SSW (2013)")
+parser.add_argument("--dir-after", type=float, default=20, help="wind from (deg) after the shift; 20 = NNE outflow")
+parser.add_argument("--turn-s", type=float, default=180, help="seconds the wind takes to turn clockwise to --dir-after")
 parser.add_argument("--silent-node", default="N3")
 parser.add_argument("--silent-after", type=int, default=90)
 parser.add_argument("--fire-node", default="N2", help="spot fire placed at this node's position")
@@ -28,6 +31,8 @@ try:
     while True:
         elapsed = time.monotonic() - started
         shifted = elapsed >= args.wind_shift_after
+        turned = min(max(elapsed - args.wind_shift_after, 0) / max(args.turn_s, 1), 1) if shifted else 0
+        wind_dir = round((args.dir_before + turned * ((args.dir_after - args.dir_before) % 360)) % 360)
         for node in sequence:
             if node == args.silent_node and elapsed >= args.silent_after:
                 continue
@@ -36,7 +41,7 @@ try:
                 "temp_c": round(random.uniform(28, 33) + (4 if shifted else 0), 1),
                 "rh": round(random.uniform(15, 22) - (5 if shifted else 0), 1),
                 "wind_ms": round(random.uniform(2, 3) + (5 if shifted else 0), 1),
-                "wind_dir": 180 if shifted else 270, "flame": 0, "batt": 90,
+                "wind_dir": wind_dir, "flame": 0, "batt": 90,
                 "_simulated": True,
             }
             client.publish(f"sensors/{node}/wx", json.dumps(payload))
@@ -46,7 +51,7 @@ try:
                 {"type": "fire", "src": "SIM", "node": args.fire_node, "conf": 0.9, "_simulated": True}))
             fire_sent = True
             print(f"t={int(elapsed)}s spot fire at {args.fire_node}")
-        print(f"t={int(elapsed)}s sent; shifted={shifted}")
+        print(f"t={int(elapsed)}s sent; wind from {wind_dir}")
         time.sleep(10)
 finally:
     client.loop_stop()

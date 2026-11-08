@@ -29,6 +29,9 @@ SEPARATION_FLAME_MULT = 4.0  # unsafe within 4 x flame length of the front (Butl
 LIVE_HERB_MOISTURE = 0.30    # fraction. PLACEHOLDER: cured grass, June drought
 LIVE_WOODY_MOISTURE = 0.60   # fraction. PLACEHOLDER: stressed chaparral
 RFM_CORRECTION_PCT = 0       # Fosberg Table B correction; 0 = exposed, midday (most conservative)
+BURNOUT_S = 300             # a cell burns this long after the fire reaches it, then it is the black (§2.4)
+SLOPE_BAND_DEG = 5           # spread rates cached per (fuel, slope band, aspect band, direction) (§2.4)
+ASPECT_BAND_DEG = 22.5
 FIRE_MERGE_M = 30            # a new fire point within this distance of an existing one is the same fire
 
 # ---- Crew model (§4) --------------------------------------------------------
