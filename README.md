@@ -12,7 +12,31 @@ MQTT broker → ws_server.py → WebSocket dashboard
 
 `ws_server.py` forwards every `sensors/#`, `engine/#`, and `crew/#` MQTT
 message to connected dashboards at `/ws`. `ingest.py` saves weather heartbeats
-from `sensors/+/wx` into the `readings` table.
+from `sensors/+/wx` into the `readings` table. `engine.py` (margin engine)
+subscribes to the sensor, fire, crew and `engine/cmd` topics and publishes
+`engine/state` every second.
+
+## Margin engine (v1)
+
+Fire spread from pyrothermel, crew times on the escape routes in
+`routes.geojson`, margins, reroute and alerts. Until the real
+`data/yarnell/nodes.json` and `data/yarnell/routes.geojson` exist it uses the
+placeholders in `data/yarnell/placeholder/` and reports
+`"placeholder_data": true`. Details, message format and the gaps to the
+planned v2 engine: `docs/LCES_Design.md` §5.6.
+
+```bash
+uv sync --group engine                        # once, needs internet (builds pyrothermel)
+uv run --group engine python test_margin.py   # 14 checks
+uv run --group engine python engine.py        # live; MQTT_HOST from .env
+```
+
+Offline demo story against a local broker:
+
+```bash
+uv run --group engine python engine.py --allow-sim
+uv run python simulator.py --fire-after 20 --wind-shift-after 60 --silent-after 90
+```
 
 ## Test real sensor data from a laptop
 

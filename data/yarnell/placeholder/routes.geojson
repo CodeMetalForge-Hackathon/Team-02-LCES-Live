@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "_comment": "PLACEHOLDER escape routes so the margin engine can run before Person A writes data/yarnell/routes.geojson. Both start at the real observation deck (sites.geojson). R1 passes the real deployment site; both safety zones are MADE UP (not Boulder Springs Ranch, not the real black). Each LineString runs FROM the crew start TO a safety zone. Tuned so the simulator's wind shift (270 -> 180) with a fire at placeholder N2 turns R1 red and reroutes to R2.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"id": "R1", "name": "East into the bowl (PLACEHOLDER)", "to": "PLACEHOLDER safety zone A",
+                     "trail": true, "sz_radius_m": 60},
+      "geometry": {"type": "LineString", "coordinates": [
+        [-112.78221, 34.22146], [-112.77980, 34.22100], [-112.77750, 34.22046], [-112.77400, 34.21850]
+      ]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "R2", "name": "West along the ridge (PLACEHOLDER)", "to": "PLACEHOLDER safety zone B",
+                     "trail": false, "travel_factor": 0.6, "sz_radius_m": 80},
+      "geometry": {"type": "LineString", "coordinates": [
+        [-112.78221, 34.22146], [-112.78550, 34.22220], [-112.78900, 34.22320], [-112.79200, 34.22350]
+      ]}
+    }
+  ]
+}

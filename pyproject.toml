@@ -13,3 +13,11 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+engine = [
+    "numpy>=2.4.6",
+    "pyproj>=3.7.2",
+    "pyrothermel>=0.1.4",
+    "rasterio>=1.4.4",
+]

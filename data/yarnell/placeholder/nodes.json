@@ -1,0 +1,6 @@
+{
+  "_comment": "PLACEHOLDER positions so the margin engine can run before Person A writes data/yarnell/nodes.json. N1 sits on the real observation deck (sites.geojson); N2/N3 are made-up spots. The engine prefers data/yarnell/nodes.json as soon as it exists.",
+  "N1": {"lat": 34.22146, "lon": -112.78221, "label": "Ridge (observation deck) - wind"},
+  "N2": {"lat": 34.21000, "lon": -112.77100, "label": "PLACEHOLDER: south of the bowl"},
+  "N3": {"lat": 34.21850, "lon": -112.78700, "label": "PLACEHOLDER: southwest slope"}
+}

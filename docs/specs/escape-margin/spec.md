@@ -151,6 +151,7 @@ For the demo (2013 replay, real time): the scenario starts at 16:20 with the cre
 
 ## Further Notes
 
+- A v1 engine already runs (`engine.py`, `margin.py`, `fire_model.py`, `config.py`, `test_margin.py`): hand-drawn routes, straight-line spread, `engine/cmd`, 14 checks pass. It is the demo fallback; the design doc §5.6 lists every gap between it and this spec.
 - Deadline: submissions Sun Nov 8, 12:00. The riskiest hand-off is the routing graph reaching the engine; fallback is a coarser 20 m grid.
 - Still to tune on the day: hot-sensor thresholds (a DHT11 tops out near 50 °C), wind scale with the real fan, ranch radius against the hillshade.
 - Still to draw by hand from the SAIT report maps: the black at ~16:00 and the 2013 descent line. Still to pick: exact sensor node coordinates.

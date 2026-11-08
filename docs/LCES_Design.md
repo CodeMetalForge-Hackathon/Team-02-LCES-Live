@@ -28,7 +28,7 @@ Core question the system answers, continuously:
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
 | Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
-| Margin engine | Not started; **design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek | Fire spread on the grid, scipy routing, `engine/state` (§5.5) |
+| Margin engine (`engine.py`) | **v1 working with placeholder routes/nodes (§5.6):** pyrothermel spread from each fire point, Tobler crew times on hand-drawn routes, stale-node worst case, reroute + alerts, `engine/state` every second; 14 checks pass (`test_margin.py`); verified end to end with the simulator. **v2 design settled Nov 8** (§2.4, §4.6, §5; `docs/adr/`) | Vivek | Real `nodes.json` / `routes.geojson`; build pyrothermel on the Pi; move v1 toward v2 (gap list in §5.6) |
 | Flame sensor, LoRa link, thermal lookout, crew tag | **Cut (Nov 8)** | — | — |
 | Node placement (fake GPS per node, §1.4) | **Decided Nov 8:** N1 on the ridge near the saddle, N2 in the box canyon, N3 between canyon and ranch | TBD | Pick exact lat/lon on the map |
 
@@ -70,7 +70,8 @@ Recompute on every incoming message **and at least every 5 s** (the fire moves w
 | `sensors/<node>/wx` | Sensor nodes, wind bridge, simulator | Weather heartbeat (every 10 s for ESP32 nodes; N1 per radio packet, §1.3) |
 | `sensors/<src>/fire` | Dashboard "ignite" button (manual fire point) | Fire point at a sensor node's position or an explicit lat/lon. Hot-sensor fire points are created inside the engine (§1.4) |
 | `crew/<id>/pos` | Scenario simulator | Crew position (single crew `C1`) |
-| `engine/state` | Margin engine | Escape routes, margins, fire polygons, alerts (§5.5) |
+| `engine/state` | Margin engine | Escape routes, margins, fire polygons, alerts (§5.5; v1 format as implemented: §5.6) |
+| `engine/cmd` | Demo operator / dashboard (**v1 engine only**, not in the v2 plan) | `{"cmd":"reset"}` clears fires · `{"cmd":"fire","node":"N2"}` or `{"cmd":"fire","lat":..,"lon":..}` · `{"cmd":"crew","lat":..,"lon":..}` |
 
 JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds its own receive time.
 ```json
@@ -465,6 +466,81 @@ Like a road map with some roads closed today: the graph (`graph.npz`, §4.6) is 
  "alerts":["Rerouted: back to the black"],"leave_by_ts":1762600180}
 ```
 `areas` are GeoJSON (Multi)Polygons traced from the cell grid (`rasterio.features.shapes`; adds `rasterio` as a runtime dependency). The full 40k-cell grid is not sent.
+This is the **v2 target** format. What the v1 engine publishes today is in §5.6.
+
+### 5.6 Implemented now: v1 engine (`engine.py`, Vivek, Sun Nov 8)
+Built before the Nov 8 v2 design (§2.4, §4.6, ADR 0001/0002) and runnable today, so the dashboard can be built against it. **Simplification:** no off-trail grid, no scipy/pgRouting graph, no PostGIS dependency. Each hand-drawn route in `routes.geojson` is evaluated on its own along its points (densified to 25 m); "rerouting" = switching the active route. The fire spreads in straight lines from each fire point (the original §2.4), not by minimum travel time.
+
+| File | What it does |
+|---|---|
+| `config.py` | Every tunable number: thresholds, safety factor, worst-case values, travel factors, scenario (`"2013"` = SH5 everywhere except non-burnable; `"today"` = LF2025 `fuel.tif`) |
+| `fire_model.py` | 1-h fuel moisture from temp/RH (Fosberg Table A, **verify before quoting**), pyrothermel spread in any direction (1° cache), §2.7 fallback if pyrothermel isn't installed (`"model": "fallback"` in the state). `arrival_min()` = minutes from now until a point is within 4 × flame length of the front, with the 1.5 safety factor, minus the time the fire has already burned |
+| `margin.py` | Terrain sampling (DEM, slope, aspect, fuel), route loading, Tobler crew times (trail 1.0, off-trail by fuel group = §4.3 fallback, or a per-route `travel_factor`), per-route margin |
+| `engine.py` | MQTT service: node health, conservative weather, fires, active route, alerts → `engine/state` every second (`RECOMPUTE_S = 1`) |
+| `test_margin.py` | §7 checks, 14, all pass (re-run Nov 8 after the pull, model: pyrothermel) |
+| `data/yarnell/placeholder/` | **Placeholder** `nodes.json` + `routes.geojson` (N1 on the real observation deck, everything else made up; tuned so the simulator's wind shift turns R1 red and reroutes to R2). The engine switches to `data/yarnell/nodes.json` / `routes.geojson` automatically once they exist, and reports `"placeholder_data": true/false` |
+| `simulator.py` | New flags `--fire-after <s>` / `--fire-node <id>`: one simulated spot fire on `sensors/SIM/fire` at that node |
+| `pyproject.toml` | New `engine` dependency group: numpy, pyproj, pyrothermel, rasterio |
+
+**Rules as implemented:**
+- **Weather** (one conservative value for the whole area): wind speed = highest reading (a stale node's last reading still counts); wind direction = freshest node that reports one; temp = highest, RH = lowest across fresh nodes.
+- **Node health:** fresh < 20 s, aging ≥ 20 s, stale ≥ 30 s since the last message; a node never heard from = stale. Alert "Node <id> stale" on the change.
+- **Stale node** → worst case per §5.3: wind speed `max(..., WORST_WIND_MS)`, wind direction unknown (head-fire rate in every direction), `WORST_TEMP_C`, `WORST_RH`.
+- **Active route** = the fastest route that isn't red. It changes only when it turns red and another isn't ("REROUTED" alert). All red → no reroute, "NO SAFE ROUTE" alert naming the least-bad route.
+- **Status:** §5.1 thresholds; "dropped > 30 % within 30 s" makes a green route amber and is held for 30 s so it doesn't flicker.
+- **Fires:** `sensors/<src>/fire` (`node` or `lat/lon`), a `wx` message with `"flame": 1` (fire at that node), or `engine/cmd`. Within 30 m of an existing fire = the same fire (keeps its first time). Fuel at a fire point = most common burnable code in the surrounding 30 m.
+- **Alerts:** route red, rerouted, no safe route, LEAVE NOW, node stale, active safety zone radius < 4 × flame length. Event alerts stay for 30 s.
+- **Simulator data** (`"_simulated": true`) is ignored unless `--allow-sim` or `ALLOW_SIMULATOR_DATA=true`, as in `ingest.py` / `ws_server.py`.
+
+**Run:**
+```
+uv sync --group engine                                   # once, needs internet (pyrothermel builds from source, ~35 s)
+uv run --group engine python test_margin.py              # checks
+uv run --group engine python engine.py                   # live (MQTT_HOST from .env)
+# offline demo story, two more terminals (local broker on 127.0.0.1):
+uv run --group engine python engine.py --allow-sim
+uv run python simulator.py --fire-after 20 --wind-shift-after 60 --silent-after 90
+```
+Verified Sun Nov 8 with the placeholder data (local Mosquitto + simulator, ~30 ms per recompute): fire at 20 s → R1 (active) 22 min green, R2 92 min; wind shift at 60 s → `Route R1 RED: margin -15.5 min`, `REROUTED: R1 -> R2`; N3 silent → stale after 30 s → both routes red, `NO SAFE ROUTE`.
+
+**`engine/state` message as published by v1** (one per second):
+```json
+{"type":"state","ts":1794117186.0,"scenario":"2013","model":"pyrothermel","placeholder_data":true,
+ "weather":{"wind_ms":7.9,"wind_from":180.0,"temp_c":36.0,"rh":11.1,"m1h_pct":2,"notes":[]},
+ "crew":{"lat":34.22146,"lon":-112.78221},
+ "active_route":"R2","leave_by_ts":1794119000,
+ "routes":[{"id":"R1","name":"…","to":"…","margin_min":-15.8,"status":"red","active":false,"eta_min":21.9,
+            "worst":{"lon":-112.774,"lat":34.2185,"t_fire_min":6.1,"t_crew_min":21.9}},
+           {"id":"R2","name":"…","to":"…","margin_min":61.7,"status":"amber","active":true,"eta_min":39.4,"worst":{…}}],
+ "nodes":[{"id":"N3","label":"…","lat":34.2185,"lon":-112.787,"status":"fresh|aging|stale","age_s":12}],
+ "fires":[{"id":"F1","lat":34.21,"lon":-112.771,"source":"SIM","age_s":105,"head_ros_m_min":309.6,
+           "head_dir":354.3,"flame_m":24.7,"omni":false,"burnable":true}],
+ "alerts":["REROUTED: R1 -> R2 (R1 margin -15.5 min, R2 60.1 min)"]}
+```
+- `margin_min` / `worst` are `null` when no fire threatens the route (status green). `worst` = the point that sets the margin: draw it on the map.
+- Route geometry isn't sent: the dashboard draws `routes.geojson` and colours each route by `id` → `status`. Use the same file the engine loaded (real or placeholder).
+- `leave_by_ts` = `now + margin − 2 min` for the active route (unix s; in the past = "LEAVE NOW" alert). `null` without a fire.
+- `alerts` = current conditions plus events from the last 30 s.
+
+**Gaps between v1 and the v2 plan** (§2.4, §4, §5, `docs/specs/escape-margin/spec.md`):
+
+| Topic | v1 (implemented) | v2 (planned) |
+|---|---|---|
+| Routes | Hand-drawn LineStrings `R1`/`R2`, each evaluated alone | scipy Dijkstra over the 10 m grid + OSM trails; one escape route per safety zone (`ranch`, `black`) (ADR 0001) |
+| Fire spread | Straight line from each fire point, no history | Minimum travel time on the grid with history (ADR 0002); starts from the black |
+| Safety zones | Placeholder A/B with `sz_radius_m` | Boulder Springs Ranch (100 m) and the black |
+| Fire trigger | `"flame": 1` in a `wx` message; 30 m merge | Hot-sensor rule (≥ 45 °C or +8 °C in 30 s); at most one fire point per sensor node |
+| Reset / ignite | `engine/cmd` | Dashboard buttons on `sensors/<src>/fire` (reset message format not yet defined) |
+| Wind | Highest wind across all nodes, unscaled | N1 only, × `WIND_SCALE` (4) |
+| Moisture | Hottest / driest fresh node | Same, but a node with a fire point is excluded |
+| Stale → wind direction unknown | When any node is stale | Only when N1 is stale |
+| Aging | 2 missed heartbeats (20 s), fixed 10 s interval | 1 missed heartbeat at each node's own interval |
+| Worst case | `WORST_WIND_MS` 10, `WORST_TEMP_C` 38, `WORST_RH` 8 | 13 m/s, 40 °C, 8 % (§5.3) |
+| 2013 fuel | SH5 everywhere (burnable cells) | SH5 inside the 2013 perimeter only |
+| Crew | Fixed at the first route's start (or `engine/cmd` crew) | Scenario simulator walks the 2013 descent line from the saddle at 16:20 |
+| `engine/state` | No `path`, no `areas`; fires have `age_s`; extra `weather`, `crew`, `worst`, `eta_min` | `path` per route, `areas` (black / burning / +5 / +10 min), fires with `ignition_ts` (§5.5) |
+
+**Open (decide with the team):** `WORST_WIND_MS = 10` with an unknown direction is already harsh: in dry SH5 any stale node turns every placeholder route red (head ROS ~480 m/min). Lower it, or use e.g. 1.5 × the current max, if the demo should show "margin drops" rather than "no safe route". The v2 plan raises it to 13.
 
 ---
 
@@ -520,11 +596,16 @@ psql "$DATABASE_URL" -f schema.sql
 - Downwind cells are reached before upwind cells.
 - A cell is burning for 5 min, then black.
 
-**Margin** (to write):
+**Margin** (to write for v2):
 - A route the fire cuts mid-way is red even when its safety zone is still reachable.
 - Rerouting picks the other safety zone when the ranch route is cut.
 - A stale sensor node goes grey and its worst-case values shrink the margin.
 - A hot sensor node (≥ 45 °C) creates exactly one fire point.
+
+**v1 engine** (`uv run --group engine python test_margin.py`, 14 checks, all pass, §5.6):
+- Fire: moisture table ordering; downwind fastest and unknown wind direction gives a circle; non-burnable never arrives; arrival shrinks as the fire ages and the 4 × flame buffer applies; fallback model shape.
+- Crew: Tobler uphill 101 s vs downhill 71 s per 100 m / 10 m; a route walked in reverse costs differently.
+- Margin: no fire → all green, shortest route active; a route cut mid-way is red even if its safety zone is reachable; wind shift turns R1 red and reroutes to R2; a stale node goes stale, applies worst case and shrinks the margin; reset clears fires; a flame reading creates one fire at the node; the state is JSON-serialisable.
 
 ---
 
@@ -658,6 +739,7 @@ mosquitto_sub -h localhost -t 'sensors/#' -v
 cd ~/fire && uv run python simulator.py --wind-shift-after 30 --silent-after 60
 ```
 Verified: seq 0–2 calm at 270°, ~2 m/s; seq 3 (t = 30 s) 180°, ~7.5 m/s, temp up, RH down; N3 stops after 60 s. For local dev, install Mosquitto on your laptop and run the same script; topics and format are identical.
+- **Spot fire** (added Nov 8 for the v1 engine, §5.6): `--fire-after <s>` publishes one fire point to `sensors/SIM/fire` at `--fire-node` (default N2); `-1` = never. Messages in the repo's `simulator.py` carry `"_simulated": true`.
 
 ### 8.5 WebSocket server → dashboard contract
 `ws_server.py` (FastAPI) subscribes to `sensors/#`, `engine/#`, and `crew/#` and pushes every message to the dashboard. The implementation is now in the repository root; the Appendix B code is retained as the original reference. Each WebSocket message:
@@ -681,13 +763,15 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - [x] Local PostGIS schema + `ingest.py` (MQTT → database) implemented and verified with simulator data
 - [x] `ws_server.py` working locally against the simulator; latest-message HTTP cache verified
 - [ ] Deploy the committed schema, `ingest.py`, and `ws_server.py` to the Pi; verify real MQTT messages reach both the database and WebSocket dashboard
-- [ ] Staleness monitor (fresh / aging / stale from `last_seen`) + worst-case values (§5.3)
+- [x] Staleness (fresh / aging / stale) + worst-case values, inside the v1 margin engine (§5.3, §5.6)
+- [x] v1 margin engine on hand-drawn routes, `engine/state` format documented (§5.6); placeholder data until `nodes.json` / `routes.geojson` exist
+- [x] RH/temp → 1-h fuel moisture table (`fire_model.py`; verify the table against the source)
+- [ ] Move the v1 engine toward v2: see the gap list in §5.6
 - [x] Coordinates decided: fake GPS per node, no tabletop transform (§1.4)
 - [x] Margin engine, fire spread and routing design settled (Nov 8 grilling; `docs/GLOSSARY.md`, `docs/adr/`, spec in `docs/specs/escape-margin/`)
 - [ ] Map + routing track: see the ordered list below
 - [ ] Build pyrothermel on the Pi 5
 - [x] Download LANDFIRE + 3DEP DEM for the Yarnell patch, reproject to EPSG:32612 (§3.1)
-- [ ] RH/temp → 1-h fuel moisture table
 - [ ] Questions for the operator mentor: travel speed in chaparral vs trail (calibrate the vegetation table in §4.3), acceptable margin thresholds, a quote for the pitch
 
 **Map + routing track (suggested order; 3–5 can run in parallel)**
@@ -698,7 +782,7 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
 6. [ ] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
-8. [ ] **Margin engine:** fire spread (§2.4) + closures (§5.4) + `engine/state` (§5.5), with the fire and margin checks in §7.
+8. [ ] **Margin engine:** fire spread (§2.4) + closures (§5.4) + `engine/state` (§5.5), with the fire and margin checks in §7. A v1 on hand-drawn routes already runs (§5.6); it is the fallback for the demo if the graph isn't ready.
 9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
 
 **Housekeeping**
