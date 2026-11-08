@@ -88,7 +88,7 @@ local markdown tickets. Still no GitHub Issues.)
 | 08 | Coloured backdrop + Layers panel (terrain / slope / hillshade; fuel, roads+buildings, perimeter), 12 km display area (`data/yarnell/wide/`) | dashboard | **done** (09:40) |
 | 11 | Re-plan animation (banner, pulse from crew, route drawn via `line-gradient`/`line-progress`); now mainly at Start | dashboard | **done** (08:45) |
 | 12 | Optional aerial imagery | data | needs-triage |
-| 13 | Wind smoothing: moving average (20 s, direction as a vector), rounded 5° / 0.5 m/s up | engine | **done** |
+| 13 | Wind smoothing: moving average (20 s, direction as a vector), rounded 5° / 0.5 m/s up. **11:50: averaging off** (N1 sends every ~31 s and already averages; each packet used as is, calm < 1 m/s keeps the last direction) | engine | **done** |
 | 14 | Simulated crew walks the **active route** after Start (decided over the 2013 descent line) | engine | **done** |
 | 15 | Round 2: one Active-route tile (banner + other tiles removed), big wind/fire-spread arrow panel instead of the sensor feed, map compass, legend panel, sensor chip in header | dashboard | **done** |
 

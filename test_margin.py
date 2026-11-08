@@ -548,7 +548,28 @@ def test_per_point_times_align_with_path_and_give_the_margin():
 
 
 # ---- wind smoothing + crew walk (Nov 8 dashboard round 2) ---------------------------------
-def test_wind_direction_is_smoothed_as_a_vector():
+def test_wind_uses_each_packet_and_keeps_direction_in_calm():
+    eng = graph_engine()
+    wx = lambda t, w, d: eng.on_wx({"type": "wx", "node": "N1", "wind_ms": w, "wind_dir": d, "temp_c": 30, "rh": 15}, t)
+    wx(0, 4.0, 200)
+    assert eng.smoothed_wind("N1") == (4.0, 200)
+    wx(31, 7.3, 300)                                              # next packet: full value at once, no lag
+    assert eng.smoothed_wind("N1") == (7.5, 300)                  # speed rounded up to 0.5 m/s
+    wx(62, 0.0, 150)                                              # fan off: speed drops, vane reading ignored
+    assert eng.smoothed_wind("N1") == (0.0, 300)
+    wx(93, 3.0, 90)
+    assert eng.smoothed_wind("N1") == (3.0, 90)
+
+
+def test_wind_moving_average_is_a_vector_when_enabled():
+    old, config.WIND_SMOOTH_S = config.WIND_SMOOTH_S, 20.0
+    try:
+        _check_wind_moving_average()
+    finally:
+        config.WIND_SMOOTH_S = old
+
+
+def _check_wind_moving_average():
     eng = graph_engine()
     for t, d in ((0, 350), (2, 10), (4, 350), (6, 10)):          # jumps across north
         eng.on_wx({"type": "wx", "node": "N1", "wind_ms": 4.0, "wind_dir": d, "temp_c": 30, "rh": 15}, t)

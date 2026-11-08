@@ -86,8 +86,11 @@ WORST_WIND_MS = 10.0         # PLACEHOLDER (§5.3 open question)
 WORST_TEMP_C = 38.0          # PLACEHOLDER
 WORST_RH = 8.0               # PLACEHOLDER
 
-# ---- Wind smoothing (N1 readings jump around) ---------------------------------
-WIND_SMOOTH_S = 20.0         # time constant of the moving average (wind direction averaged as a vector)
+# ---- Wind smoothing ------------------------------------------------------------
+# N1 (La Crosse TX145WSDTHv3) sends one packet every ~31.4 s (measured on the Pi, Nov 8) and the sensor already
+# averages the wind over that interval, so a moving average here only adds lag (~1 min to show a fan turn).
+WIND_SMOOTH_S = 0.0          # 0 = use each packet as is; > 0 = moving-average time constant (direction as a vector)
+WIND_CALM_MS = 1.0           # below this the vane points anywhere: keep the last direction, take the speed
 WIND_DIR_STEP_DEG = 5        # smoothed direction rounded to this, so tiny wobbles don't re-run the fire grid
 WIND_SPEED_STEP_MS = 0.5     # smoothed speed rounded UP to this (conservative)
 

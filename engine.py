@@ -118,11 +118,13 @@ class MarginEngine:
                     self.hot.add(node)                       # same spot again merges: first time kept
 
     def _smooth_wind(self, node: str, w: float, d: float, now: float) -> None:
-        """Exponential moving average (time constant WIND_SMOOTH_S) of the wind, the direction as a unit vector
-        so 350 deg and 10 deg average to 0 deg, not 180."""
+        """Latest packet (WIND_SMOOTH_S = 0) or an exponential moving average, the direction as a unit vector so
+        350 deg and 10 deg average to 0 deg, not 180. In calm air (< WIND_CALM_MS) the last direction is kept."""
         ux, uy = math.sin(math.radians(d)), math.cos(math.radians(d))
         prev = self.wind_avg.get(node)
-        if prev is None or now - prev[0] > config.health_s(node)[1]:
+        if prev is not None and w < config.WIND_CALM_MS:
+            ux, uy = prev[1], prev[2]                        # vane is meaningless without wind
+        if prev is None or config.WIND_SMOOTH_S <= 0 or now - prev[0] > config.health_s(node)[1]:
             self.wind_avg[node] = (now, ux, uy, w)
             return
         t0, px, py, pw = prev
