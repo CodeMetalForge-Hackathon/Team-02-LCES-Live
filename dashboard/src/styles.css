@@ -142,7 +142,7 @@ h2 {
 .status-banner.amber .sb-state { color: var(--warn); } .status-banner.amber .sb-state > i { background: var(--warn); }
 .status-banner.red .sb-state { color: var(--danger); } .status-banner.red .sb-state > i { background: var(--danger); box-shadow: 0 0 0 3px rgba(207, 106, 96, .22); }
 .sb-note { margin: 11px 0 14px; color: var(--dim); font-size: .8rem; }
-.sb-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; }
+.sb-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; background: var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; }
 .sb-metrics > div { background: var(--surface-2); padding: 12px 12px; }
 .sb-metrics span { display: block; font-size: .54rem; letter-spacing: .12em; color: var(--dim); font-weight: 700; }
 .sb-metrics b { display: block; font-family: var(--mono); font-size: 1.44rem; font-weight: 600; margin: 5px 0 2px; }
@@ -275,31 +275,11 @@ h2 {
   .topbar { gap: 8px; }
 }
 
-/* ---- re-plan animation (ticket 11) ---- */
-.replan-banner {
-  position: fixed; z-index: 21; top: 70px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px; white-space: nowrap;
-  background: var(--surface); color: var(--text); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 9px 16px; font-size: .86rem; box-shadow: var(--shadow-float);
-  animation: replan-in .25s ease-out;
-}
-.replan-banner.done { border-color: #50bb9d; }
-.replan-banner b { color: #7fd6bd; }
-.replan-spinner {
-  width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(127, 180, 230, .3); border-top-color: #7fb4e6;
-  animation: replan-spin .8s linear infinite;
-}
-@keyframes replan-in { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
-@keyframes replan-spin { to { transform: rotate(360deg); } }
-/* MapLibre positions the marker element with transform, so the rings animate inside it */
-.pulse-marker { width: 0; height: 0; pointer-events: none; }
-.pulse-marker i {
-  position: absolute; left: -14px; top: -14px; width: 28px; height: 28px; border-radius: 50%;
-  border: 3px solid #7fb4e6; opacity: 0; animation: replan-pulse 1.4s ease-out forwards;
-}
-.pulse-marker i + i { animation-delay: .5s; }
-@keyframes replan-pulse { from { transform: scale(.5); opacity: .95; } to { transform: scale(5); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .pulse-marker i, .replan-spinner { animation: none; } }
+/* ---- re-plan animation (App.tsx playReplan) ---- */
+.replan-pulse { width: 24px; height: 24px; border-radius: 50%; border: 3px solid var(--info); pointer-events: none;
+  animation: pulse 1.2s ease-out infinite; }
+@keyframes pulse { from { transform: scale(.6); opacity: .95; } to { transform: scale(5); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .replan-pulse { animation: none; } }
 
 /* ---- map layer switch (ticket 08) ---- */
 .layer-switch {

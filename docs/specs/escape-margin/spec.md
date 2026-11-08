@@ -104,7 +104,7 @@ For the demo (2013 replay, real time, kept close to what happened; decided Nov 8
 - `routes`: per escape route: `id` ("ranch" / "black"), `margin_min`, `status` (green/amber/red), `active` (bool), `path` (list of lon/lat).
 - `nodes`: per sensor node: `id`, `status` (fresh/aging/stale), `age_s`.
 - `fires`: per fire point: `lat`, `lon`, `ignition_ts`.
-- `areas`: GeoJSON polygons for `black`, `burning`, `front_5min`, `front_10min`, traced from the cell grid (not the full grid).
+- `fire_grid`: fire arrival time per grid cell (`margin.fire_grid_msg`; replaced the `areas` polygons Nov 8, demo-dashboard ticket 16). The dashboard draws black, burning, 0–5 and 5–10 min from it.
 - `alerts`: list of human-readable strings.
 - `leave_by_ts`.
 

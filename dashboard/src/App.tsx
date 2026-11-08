@@ -64,17 +64,49 @@ const point = (lon: number, lat: number, properties: Record<string, unknown> = {
   ({ type: "Feature", properties, geometry: { type: "Point", coordinates: [lon, lat] } });
 
 type EngineRoute = NonNullable<EngineState["routes"]>[number];
-const ROUTE_COLOR: Record<string, string> = { green: "#50bb9d", amber: "#d9a95a", red: "#cf6a60" };
-// ticket 11: the active route drawn from the crew to the safety zone after Start / a reroute
-const DRAW_DELAY_MS = 400, DRAW_MS = 1500, PLANNING_MS = 1500, RESULT_MS = 5000;
-const drawGradient = (color: string, p: number) => ["step", ["line-progress"], color, Math.min(1, Math.max(1e-4, p)), "rgba(0,0,0,0)"];
-// base routes layer: hide the active route while it is being drawn; the cut route moves to the dashed layer
-function setRouteFilters(map: Map, drawing: boolean, cutId: string | null) {
-  const parts: any[] = [];
-  if (drawing) parts.push(["!", ["get", "active"]]);
-  if (cutId) parts.push(["!=", ["get", "id"], cutId]);
-  map.setFilter("routes", parts.length ? ["all", ...parts] as any : null);
-  map.setFilter("routes-cut", ["==", ["get", "id"], cutId ?? ""]);
+const STATUS_COLOR: Record<string, string> = { green: "#50bb9d", amber: "#d9a95a", red: "#cf6a60", grey: "#8c9691" };
+const CLEAR = "rgba(0,0,0,0)";
+type OldRoute = { path: [number, number][]; status: string };
+type Anim = { raf?: number; timers: number[]; pulse?: maplibregl.Marker };
+const lineFc = (path: [number, number][], properties: Record<string, unknown> = {}) =>
+  fc([{ type: "Feature", properties, geometry: { type: "LineString", coordinates: path } }]);
+
+function stopReplan(m: Map, a: Anim) {
+  if (a.raf) cancelAnimationFrame(a.raf);
+  a.timers.forEach(clearTimeout);
+  a.timers = [];
+  a.pulse?.remove();
+  m.setFilter("routes", null);
+  (m.getSource("route-draw") as GeoJSONSource).setData(empty);
+  (m.getSource("route-ghost") as GeoJSONSource).setData(empty);
+}
+
+// Re-plan animation (ticket 11): pulse from the crew, the new route drawn from the crew to the safety zone,
+// the old path dashed for a few seconds. No banner: the alert list says what happened.
+function playReplan(m: Map, a: Anim, r: EngineRoute, old: OldRoute | undefined, crew: EngineState["crew"]) {
+  if (!r.path || r.path.length < 2) return;
+  stopReplan(m, a);
+  const color = STATUS_COLOR[r.status] ?? STATUS_COLOR.grey, DELAY_MS = 600, DRAW_MS = 1500;
+  if (crew) {
+    const el = document.createElement("div");
+    el.className = "replan-pulse";
+    a.pulse = new maplibregl.Marker({ element: el }).setLngLat([crew.lon, crew.lat]).addTo(m);
+  }
+  if (old?.path.length) (m.getSource("route-ghost") as GeoJSONSource).setData(lineFc(old.path, { color: STATUS_COLOR[old.status] ?? STATUS_COLOR.grey }));
+  m.setFilter("routes", ["!=", ["get", "id"], r.id]);
+  (m.getSource("route-draw") as GeoJSONSource).setData(lineFc(r.path));
+  const t0 = performance.now();
+  const frame = (t: number) => {
+    const p = Math.min(Math.max((t - t0 - DELAY_MS) / DRAW_MS, 0), 1);
+    m.setPaintProperty("route-draw", "line-gradient", ["step", ["line-progress"], color, Math.max(p, 1e-4), p >= 1 ? color : CLEAR]);
+    if (p < 1) { a.raf = requestAnimationFrame(frame); return; }
+    a.raf = undefined;
+    a.pulse?.remove();
+    m.setFilter("routes", null);
+    (m.getSource("route-draw") as GeoJSONSource).setData(empty);
+    a.timers.push(window.setTimeout(() => (m.getSource("route-ghost") as GeoJSONSource).setData(empty), 5000));
+  };
+  a.raf = requestAnimationFrame(frame);
 }
 const GREEN_MIN = 5, RED_MIN = 2;   // config.py margin thresholds
 const marginClass = (m: number) => m >= GREEN_MIN ? "good" : m >= RED_MIN ? "warn" : "danger";
@@ -87,6 +119,16 @@ function tightestIndex(r: EngineRoute): number | null {
   });
   return best;
 }
+// metres along a lon/lat path, cumulative per point (equirectangular: fine over a few km)
+function pathMetres(path: [number, number][]): number[] {
+  const out = [0];
+  for (let i = 1; i < path.length; i++) {
+    const [x0, y0] = path[i - 1], [x1, y1] = path[i], k = Math.cos((y0 + y1) / 2 * Math.PI / 180);
+    out.push(out[i - 1] + Math.hypot((x1 - x0) * k, y1 - y0) * 111320);
+  }
+  return out;
+}
+const fmtDist = (m: number) => m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`;
 function nearestIndex(path: [number, number][], lon: number, lat: number): number {
   const k = Math.cos(lat * Math.PI / 180);
   let best = 0, bestD = Infinity;
@@ -99,7 +141,7 @@ function routePointHtml(engine: EngineState, r: EngineRoute, i: number): string 
   const at = (min: number) => engine.phase === "running" && engine.started_ts != null && engine.ts != null
     ? ` (${scenarioClock(engine.scenario_start ?? "16:20", engine.ts - engine.started_ts + min * 60).slice(0, 5)})` : "";
   const rows = [
-    c == null ? "Crew joins this route further on" : `Crew here in <b>${c.toFixed(1)} min</b>${at(c)}`,
+    c == null ? "Crew joins this route further on" : `Crew here in <b>${c.toFixed(1)} min</b>${at(c)} · ${fmtDist(pathMetres(r.path!)[i])}`,
     f == null ? "Fire not expected here" : `Fire here in <b>${f.toFixed(1)} min</b>${at(f)}`,
   ];
   if (c != null && f != null) rows.push(`<span class="${marginClass(f - c)}">Margin here <b>${(f - c).toFixed(1)} min</b></span>`);
@@ -148,14 +190,12 @@ function addLayers(map: Map) {
   map.addLayer({ id: "routes", type: "line", source: "routes", layout: { "line-cap": "round", "line-join": "round" }, paint: {
     "line-color": ["match", ["get", "status"], "green", "#50bb9d", "amber", "#d9a95a", "red", "#cf6a60", "#8c9691"],
     "line-width": ["case", ["get", "active"], 7, 4], "line-opacity": ["case", ["get", "active"], 1, .75] } });
-  // the route the crew left at a reroute: dashed (ticket 11)
-  map.addLayer({ id: "routes-cut", type: "line", source: "routes", filter: ["==", ["get", "id"], ""], layout: { "line-cap": "butt" }, paint: {
-    "line-color": ["match", ["get", "status"], "green", "#50bb9d", "amber", "#d9a95a", "red", "#cf6a60", "#8c9691"],
-    "line-width": 4, "line-opacity": .85, "line-dasharray": [2, 1.5] } });
-  // active route being drawn after Start / a reroute; lineMetrics for line-progress
+  // re-plan animation (playReplan): the old path dashed, the new one drawn from the crew outward
+  map.addSource("route-ghost", { type: "geojson", data: empty });
+  map.addLayer({ id: "route-ghost", type: "line", source: "route-ghost", paint: { "line-color": ["get", "color"], "line-width": 4, "line-dasharray": [1.5, 1.5], "line-opacity": .85 } });
   map.addSource("route-draw", { type: "geojson", data: empty, lineMetrics: true });
   map.addLayer({ id: "route-draw", type: "line", source: "route-draw", layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-width": 7, "line-gradient": drawGradient("#50bb9d", 0) as any } });
+    paint: { "line-width": 7, "line-gradient": ["step", ["line-progress"], CLEAR, 1, CLEAR] } });
   // invisible wide line: easier hover / tap target for the route tooltip
   map.addLayer({ id: "routes-hit", type: "line", source: "routes", paint: { "line-width": 16, "line-opacity": 0 } });
   map.addSource("tightest", { type: "geojson", data: empty });
@@ -233,8 +273,8 @@ function Legend() {
     [line("#50bb9d"), "Safe (margin ≥ 5 min)"],
     [line("#d9a95a"), "Tight (2–5 min)"],
     [line("#cf6a60"), "Cut: fire arrives first"],
-    [line("#cf6a60", "6 4"), "Route left at a reroute"],
     [<svg width="30" height="12"><circle cx="15" cy="6" r="5" fill="none" stroke="#cf6a60" strokeWidth="2" /></svg>, "Tightest point"],
+    [line("#cf6a60", "3 3"), "Previous path (just re-planned)"],
     [line("#e8eef0", "1 4", 2), "2013 crew route"],
     [line("#c76a5e", "6 4", 2), "2013 fire perimeter"],
     [fill("#0b0b0c", .6, "#3a3f44"), "The black (burned)"],
@@ -277,12 +317,9 @@ export default function App() {
   const [base, setBase] = useState<BaseLayer>("terrain");
   const [overlays, setOverlays] = useState({ fuel: false, osm: true, perimeter: true });
   const [layersOpen, setLayersOpen] = useState(false);
-  // re-plan animation (ticket 11): set when engine/state.replan_ts changes while the page is open
-  const [replan, setReplan] = useState<{ key: number; kind: "start" | "reroute"; stage: "planning" | "done" } | null>(null);
-  const [drawing, setDrawing] = useState(false);
-  const [cutId, setCutId] = useState<string | null>(null);
-  const lastReplan = useRef<number | null | undefined>(undefined);   // undefined = no engine/state seen yet
-  const lastPhase = useRef<string | undefined>(undefined), lastActive = useRef<string | null>(null);
+  const anim = useRef<Anim>({ timers: [] });
+  // what the last engine/state said, to spot a new plan (Start, reroute) or a route the fire bent (detour)
+  const seen = useRef<{ replan: number | null | undefined; active?: string; replanned: Record<string, number | null | undefined>; paths: Record<string, OldRoute> } | null>(null);
 
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now() / 1000), 1000); return () => clearInterval(timer); }, []);
 
@@ -356,6 +393,22 @@ export default function App() {
     fireLayer.current?.update(engine.fire_grid, engine.ts).catch(err => console.error("fire_grid", err));
   }, [engine, mapReady]);
 
+  useEffect(() => {
+    if (!mapReady || !map.current || engineAt == null) return;
+    const prev = seen.current, rs = engine.routes ?? [], active = rs.find(r => r.active);
+    seen.current = { replan: engine.replan_ts, active: active?.id, replanned: Object.fromEntries(rs.map(r => [r.id, r.replanned_ts])),
+      paths: Object.fromEntries(rs.map(r => [r.id, { path: r.path ?? [], status: r.status }])) };
+    if (!prev) return;                              // first state after a page load: show it, don't replay
+    if (engine.phase !== "running") { stopReplan(map.current, anim.current); return; }
+    if (active && engine.replan_ts != null && engine.replan_ts !== prev.replan) {
+      const atStart = engine.replan_ts === engine.started_ts;
+      playReplan(map.current, anim.current, active, atStart || !prev.active ? undefined : prev.paths[prev.active], engine.crew);
+      return;
+    }
+    const bent = rs.find(r => r.replanned_ts != null && r.replanned_ts !== prev.replanned[r.id]);
+    if (bent) playReplan(map.current, anim.current, bent, prev.paths[bent.id], engine.crew);
+  }, [engine, engineAt, mapReady]);
+
   // node popup content, kept live from the latest engine/state + sensor readings
   function renderNodePopup() {
     const h = nodeHover.current, n = engineRef.current.nodes?.find(x => x.id === h?.id);
@@ -375,18 +428,6 @@ export default function App() {
     h.popup.setLngLat(r.path[i]).setHTML(routePointHtml(engine, r, i));
   }, [engine]);
 
-  // detect a new plan: Start (previous phase ready) or a reroute; the first state after a reload only records it
-  useEffect(() => {
-    if (engineAt == null) return;
-    const r = engine.replan_ts ?? null, prev = lastReplan.current, wasReady = lastPhase.current === "ready", prevActive = lastActive.current;
-    lastReplan.current = r; lastPhase.current = engine.phase; lastActive.current = engine.routes?.find(x => x.active)?.id ?? null;
-    if (r == null) { setReplan(null); setCutId(null); return; }
-    if (prev === undefined || r === prev) return;
-    const kind = wasReady || prev == null ? "start" : "reroute";
-    setCutId(kind === "reroute" ? prevActive : null);
-    setReplan({ key: r, kind, stage: "planning" });
-  }, [engine, engineAt]);
-
   useEffect(() => {
     const m = map.current;
     if (!mapReady || !m) return;
@@ -396,36 +437,6 @@ export default function App() {
     ["osm-buildings", "osm-tracks", "osm-roads"].forEach(id => vis(id, overlays.osm));
     vis("perimeter-line", overlays.perimeter);
   }, [base, overlays, mapReady]);
-  useEffect(() => { if (mapReady && map.current) setRouteFilters(map.current, drawing, cutId); }, [drawing, cutId, mapReady]);
-
-  // banner timing, pulse from the crew, and the active route drawn progressively
-  useEffect(() => {
-    const m = map.current;
-    if (!replan || !mapReady || !m) return;
-    const timers = [window.setTimeout(() => setReplan(x => x && { ...x, stage: "done" }), PLANNING_MS),
-                    window.setTimeout(() => setReplan(null), PLANNING_MS + RESULT_MS)];
-    let pulse: maplibregl.Marker | undefined;
-    const crew = engineRef.current.crew;
-    if (crew) {
-      const el = document.createElement("div"); el.className = "pulse-marker"; el.innerHTML = "<i></i><i></i>";
-      pulse = new maplibregl.Marker({ element: el, anchor: "center" }).setLngLat([crew.lon, crew.lat]).addTo(m);
-      timers.push(window.setTimeout(() => pulse?.remove(), 2200));
-    }
-    const src = m.getSource("route-draw") as GeoJSONSource;
-    let raf = 0, t0 = performance.now(), shown: EngineRoute | undefined;
-    setDrawing(true);
-    const frame = (t: number) => {
-      const r = engineRef.current.routes?.find(x => x.active && x.path?.length);
-      if (!r) { t0 = t; raf = requestAnimationFrame(frame); return; }   // active route not chosen yet: wait for it
-      if (r !== shown) { src.setData(fc([{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: r.path! } }])); shown = r; }
-      const p = (t - t0 - DRAW_DELAY_MS) / DRAW_MS;
-      m.setPaintProperty("route-draw", "line-gradient", drawGradient(ROUTE_COLOR[r.status] ?? "#8c9691", p) as any);
-      if (p < 1) raf = requestAnimationFrame(frame);
-      else { setDrawing(false); src.setData(empty); }
-    };
-    raf = requestAnimationFrame(frame);
-    return () => { timers.forEach(clearTimeout); cancelAnimationFrame(raf); pulse?.remove(); src.setData(empty); setDrawing(false); };
-  }, [replan?.key, mapReady]);
 
   useEffect(() => { if (!resetArmed) return; const t = window.setTimeout(() => setResetArmed(false), 3000); return () => clearTimeout(t); }, [resetArmed]);
 
@@ -449,7 +460,6 @@ export default function App() {
     Math.hypot((f.lat - n2.lat!) * 111320, (f.lon - n2.lon!) * 111320 * Math.cos(n2.lat! * Math.PI / 180)) < 30);
   const active = routes.find(r => r.active);
   const crewNote = engine.crew?.arrived ? "Crew in the safety zone" : engine.crew?.walking ? "Crew walking this route" : phase === "ready" ? "Press play to begin" : "";
-  const statusWord = active ? ({ green: "Clear", amber: "Tightening", red: "Route cut" } as Record<string, string>)[active.status] ?? "—" : "No active route";
   const leaveBy = engine.leave_by_ts
     ? (clock && engine.started_ts != null && engine.ts != null
         ? scenarioClock(engine.scenario_start ?? "16:20", engine.leave_by_ts - engine.started_ts).slice(0, 5)
@@ -478,21 +488,17 @@ export default function App() {
       </div>
     </div>
     {cmdError && <div className="cmd-error">{cmdError}</div>}
-    {replan && <div className={`replan-banner ${replan.stage}`} role="status">
-      {replan.stage === "planning"
-        ? <><span className="replan-spinner" />{replan.kind === "start" ? "Planning escape route…" : "Re-planning escape route…"}</>
-        : <>{replan.kind === "start" ? "Escape route: " : "Rerouted: "}<b>{active?.name ?? active?.id ?? "—"}</b></>}
-    </div>}
 
     <aside className="rail">
       <section className={`status-banner ${active?.status ?? "none"}`}>
         <div className="sb-head">
           <span className="sb-label">ACTIVE ESCAPE ROUTE</span>
-          <span className="sb-state"><i />{statusWord}</span>
+          <span className="sb-state" title={active ? `route ${active.status}` : "no active route"}><i /></span>
         </div>
         <p className="sb-note">{crewNote || "Awaiting engine assessment"}</p>
         <div className="sb-metrics">
           <div><span>MARGIN</span><b>{active && active.margin_min != null ? active.margin_min.toFixed(1) : "—"}</b><small>{active?.margin_min == null ? "no fire threat" : "min · worst point"}</small></div>
+          <div><span>DISTANCE</span><b>{active?.path?.length ? fmtDist(pathMetres(active.path)[active.path.length - 1]) : "—"}</b><small>to the zone</small></div>
           <div><span>CREW ETA</span><b>{active?.eta_min != null ? active.eta_min.toFixed(1) : "—"}</b><small>min to zone</small></div>
           <div><span>LEAVE BY</span><b>{leaveBy}</b><small>{engine.leave_by_ts ? "scenario time" : "no deadline"}</small></div>
         </div>

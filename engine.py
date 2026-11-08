@@ -78,6 +78,9 @@ class MarginEngine:
         self.crew_external = False                           # a real crew/<id>/pos arrived: stop the simulated walk
         self.crew_arrived = False
         self._last_step: float | None = None
+        self.temps: dict[str, deque] = {}                    # node -> (t, temp_c) of the last HOT_RISE_S
+        self.hot: set[str] = set()                           # nodes that lit a fire point (hot sensor rule)
+        self.replanned: dict[str, tuple[float, object]] = {}   # route -> (ts, xy) of the last announced detour
         self.latest: dict[str, tuple[dict, float]] = {}      # node -> (last wx message, rx time)
         self.fires: list[FirePoint] = []
         self.start_xy = self.crew_xy = tuple(routes[0].xy[0])   # default: start of the first route
@@ -102,6 +105,16 @@ class MarginEngine:
             self._smooth_wind(node, w, d, now)
         if data.get("flame") == 1 and node in self.nodes:
             self.add_fire(self.nodes[node]["x"], self.nodes[node]["y"], now, f"{node} flame sensor")
+        temp = _num(data, "temp_c")
+        if temp is not None and node in self.nodes:          # hot sensor node rule (§1.4): the hair dryer
+            h = self.temps.setdefault(node, deque())
+            h.append((now, temp))
+            while now - h[0][0] > config.HOT_RISE_S:
+                h.popleft()
+            if temp >= config.HOT_TEMP_C or temp - min(c for _, c in h) > config.HOT_RISE_C:
+                n = self.nodes[node]
+                if self.add_fire(n["x"], n["y"], now, f"{node} hot sensor ({temp:.0f} C)") is not None:
+                    self.hot.add(node)                       # same spot again merges: first time kept
 
     def _smooth_wind(self, node: str, w: float, d: float, now: float) -> None:
         """Exponential moving average (time constant WIND_SMOOTH_S) of the wind, the direction as a unit vector
@@ -174,6 +187,9 @@ class MarginEngine:
             self.crew_xy = self.start_xy
             self._ready_xy = None
             self.crew_external, self.crew_arrived, self._last_step = False, False, None
+            self.temps.clear()
+            self.hot.clear()
+            self.replanned.clear()
             for h in self.history.values():
                 h.clear()
             self.drop_until.clear()
@@ -224,7 +240,7 @@ class MarginEngine:
             if d is not None and age < wind_from_age:
                 wind_from, wind_from_age = d % 360, age
             for value, bucket in ((_num(data, "temp_c"), temps), (_num(data, "rh"), rhs)):
-                if value is not None:
+                if value is not None and nid not in self.hot:   # a node in the fire says nothing of the air
                     bucket.append(value)
         if stale:
             # §5.3: we can no longer vouch for the wind in that area either, so its direction
@@ -253,7 +269,7 @@ class MarginEngine:
         if margin is not None:
             peak = max((m for _, m in h), default=margin)
             h.append((now, margin))
-            if peak > 0 and (peak - margin) / peak > config.DROP_AMBER_FRACTION:
+            if 0 < margin < config.DROP_AMBER_BELOW_MIN and (peak - margin) / peak > config.DROP_AMBER_FRACTION:
                 self.drop_until[rid] = now + config.DROP_WINDOW_S   # hold, so it doesn't flicker
         if status == "green" and now < self.drop_until.get(rid, -math.inf):
             status = "amber"                                 # dropping fast (§5.1)
@@ -288,6 +304,19 @@ class MarginEngine:
         else:
             self.crew_xy = tuple(float(v) for v in xy[i] + f * (xy[i + 1] - xy[i]))
 
+    def announce_detours(self, now: float) -> None:
+        """Event + replanned_ts when the fire bends a route somewhere new; held, as routes re-plan every step."""
+        for r in self.routes:
+            ts, xy = self.replanned.get(r.id, (-math.inf, None))
+            if not r.detour:
+                if xy is not None:
+                    self.replanned[r.id] = (ts, None)        # back on its fire-blind path
+                continue
+            moved = xy is None or np.hypot(*(r.xy[:, None] - xy[None]).T).min(0).max() > config.ROUTE_CHANGE_M
+            if moved and now - ts >= config.ROUTE_CHANGE_HOLD_S:
+                self.replanned[r.id] = (now, r.xy)
+                self.event(now, f"Route {r.id} re-planned around the fire ({r.seg_s.sum() / 60:.1f} min walk)")
+
     def compute(self, now: float) -> dict:
         health = self.node_health(now)
         for nid, (status, _) in health.items():
@@ -308,6 +337,7 @@ class MarginEngine:
             self._last_step = now
             self.fire.advance(now, wx, [(f.x, f.y, f.t0) for f in self.fires])
             self.routes = graph_routes(self.graph, self.crew_xy, self.fire, now)   # closures change every step
+            self.announce_detours(now)
             fire_min = self.fire.fire_min(now)
             max_flame = float(self.fire.flame[self.fire.burning(now)].max(initial=0.0))
         else:
@@ -377,6 +407,7 @@ class MarginEngine:
             routes.append({"id": r.route.id, "name": r.route.name, "to": r.route.to,
                            "margin_min": r1(r.margin_min), "status": status[r.route.id],
                            "active": r.route.id == self.active, "eta_min": r1(r.eta_min), "worst": worst,
+                           "replanned_ts": r1(self.replanned[r.route.id][0]) if r.route.id in self.replanned else None,
                            "path": r.route.path_lonlat(),
                            "t_crew_min": pts(r.crew_pts), "t_fire_min": pts(r.fire_pts)})
         nodes = []

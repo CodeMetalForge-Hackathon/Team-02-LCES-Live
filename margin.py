@@ -17,7 +17,6 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Transformer
-from rasterio.features import shapes
 from rasterio.transform import from_origin
 from scipy.ndimage import minimum_filter
 from scipy.sparse import csr_matrix
@@ -119,6 +118,7 @@ class Route:
     xy: np.ndarray               # (n, 2) densified points, metres
     seg_s: np.ndarray            # (n-1,) walking seconds from point i to i+1
     factor: np.ndarray           # (n,) travel factor at each point
+    detour: bool = False         # graph mode: the fire bent it off its fire-blind path (closures)
 
     def lonlat(self, i: int) -> tuple[float, float]:
         return to_lonlat(*self.xy[i])
@@ -245,7 +245,8 @@ def graph_routes(g: dict, crew_xy, fire: "FireGrid | None" = None, now: float = 
         seg_s = np.asarray(g["_m"][path[:-1], path[1:]]).ravel() if len(path) > 1 else np.zeros(0)   # crew in the zone
         factor = np.where(path < n, veg[np.minimum(path, n - 1)], config.TRAIL_FACTOR)
         routes.append(Route(rid, f"To {to}", to, False, radius,
-                            np.column_stack([g["x"][path], g["y"][path]]), seg_s, factor))
+                            np.column_stack([g["x"][path], g["y"][path]]), seg_s, factor,
+                            detour=paths[key] != blind[key]))
     return routes
 
 
@@ -433,28 +434,6 @@ class FireGrid:
             col = np.clip(((pts[:, 0] - g["x0"]) // g["res"]).astype(int), 0, nc - 1)
             return np.maximum(unsafe[row * nc + col] - now, 0) / config.SAFETY_FACTOR / 60
         return f
-
-
-def fire_areas(fire: FireGrid, now: float) -> dict:
-    """engine/state `areas` (§5.5): the black, burning, and the bands the fire reaches in the next 0-5 / 5-10 min,
-    each a GeoJSON MultiPolygon in lon/lat traced from the grid."""
-    g, a = fire.g, fire.arrival
-    nr, nc = (int(v) for v in g["shape"])
-    transform = from_origin(float(g["x0"]), float(g["ytop"]), float(g["res"]), float(g["res"]))
-    masks = {"black": fire.black(now), "burning": fire.burning(now),
-             "front_5min": (a > now) & (a <= now + 300), "front_10min": (a > now + 300) & (a <= now + 600)}
-    out = {}
-    for name, mask in masks.items():
-        m = mask.reshape(nr, nc).astype(np.uint8)
-        polys = []
-        for geom, _ in shapes(m, mask=m.astype(bool), transform=transform):
-            rings = []
-            for ring in geom["coordinates"]:
-                lon, lat = _TO_LONLAT.transform(*np.array(ring).T)
-                rings.append(np.round(np.column_stack([lon, lat]), 6).tolist())
-            polys.append(rings)
-        out[name] = {"type": "MultiPolygon", "coordinates": polys}
-    return out
 
 
 def fire_grid_msg(fire: FireGrid, now: float, t0: float) -> dict:

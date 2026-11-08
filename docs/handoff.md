@@ -103,3 +103,10 @@ Sensors / simulator → Mosquitto → `engine.py` → `engine/state` → `ws_ser
 ## Suggested skills
 - `tdd` for the hot-sensor rule; `diagnosing-bugs` if the Pi is slow or the map misbehaves; `domain-modeling` if terms
   change (`front0`, "fire area", "cold edge" aren't in the glossary yet).
+
+## Session 6 (Sun Nov 8): Yarnell Hill story animation
+`animation/index.html`: 34 s story on USGS satellite imagery; fire layer Bayer-dithered on a 1/4 grid; modern Inter panel (`window.seek(t)`, `?render`
+disables playback). Terrain = USGS 1/3" DEM (`docs/USGS_13_n35w113.tif`); fire spread = per-cell arrival time interpolated
+between nested fire areas (overview slides Jun 29 AM → 17:00 traced by colour, `scenario.geojson` 16:00–16:50, NIFC final);
+crew = lunch spot → two-track road → descent line. Rebuild data (also needs `SAT=<path to the USGS export, curl line in build_data.py>`): render slides with `pdftoppm -r 200 -png
+docs/YarnellOverview.pdf $SLIDES/s`, then `SLIDES=... uv run --with rasterio --with scipy --with pillow python animation/build_data.py`.

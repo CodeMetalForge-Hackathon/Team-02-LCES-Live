@@ -207,6 +207,53 @@ def test_flame_sensor_reading_creates_one_fire_at_the_node():
     assert abs(s["fires"][0]["lat"] - n2["lat"]) < 1e-5 and abs(s["fires"][0]["lon"] - n2["lon"]) < 1e-5
 
 
+def test_hot_sensor_creates_one_fire_at_the_node_and_is_left_out_of_the_weather():
+    def temp(eng, node, t, c):
+        eng.on_wx({"type": "wx", "node": node, "temp_c": c, "rh": 10, "wind_ms": -1, "wind_dir": -1, "flame": -1}, t)
+
+    ready = graph_engine(start_at=None)
+    temp(ready, "N2", 0, 60)
+    assert not ready.fires                                      # nothing burns before Start
+    eng = graph_engine()
+    feed(eng, 0, 7.5, 200)                                      # N2 31 C, N3 30 C
+    temp(eng, "N3", 20, 37)
+    assert not eng.fires                                        # +7 C in 20 s: not hot
+    temp(eng, "N2", 10, 40)                                     # +9 C in 10 s: hair dryer
+    assert [f.source for f in eng.fires] == ["N2 hot sensor (40 C)"]
+    temp(eng, "N3", 100, 44)
+    temp(eng, "N3", 140, 46)                                    # >= 45 C (no rise in the last 30 s)
+    temp(eng, "N2", 150, 55)                                    # N2 still hot: same fire, first time kept
+    assert [(f.source, f.t0) for f in eng.fires] == [("N2 hot sensor (40 C)", 10), ("N3 hot sensor (46 C)", 140)]
+    feed(eng, 150, 7.5, 200, skip=("N2", "N3"))
+    assert eng.compute(150)["weather"]["temp_c"] == 32         # N1's reading; the hot nodes are left out
+    eng.on_cmd({"cmd": "reset"}, 160)
+    assert not eng.hot
+
+
+def test_spot_fire_detour_announces_a_route_replan_once():
+    eng = graph_engine()
+    states = []
+    for t in range(0, 121, 5):
+        feed(eng, t, 7.5, 200)
+        if t == 60:
+            eng.on_cmd({"cmd": "fire", "node": "N2"}, t)
+        states.append(eng.compute(t))
+    assert all(r["replanned_ts"] is None for s in states[:12] for r in s["routes"])   # walking alone: no replan
+    ranch = [route_by_id(s, "ranch")["replanned_ts"] for s in states[12:]]
+    assert ranch[0] == 60, ranch                                # the fire at N2 bends the ranch route at once
+    assert sum(1 for s in states for a in s["alerts"] if a.startswith("Route ranch re-planned")) >= 1
+    times = sorted(set(ranch))
+    assert all(b - a >= config.ROUTE_CHANGE_HOLD_S for a, b in zip(times, times[1:])), times   # no flicker
+
+
+def test_fast_drop_is_amber_only_when_the_margin_is_small():
+    eng = engine()
+    assert eng._route_status("R1", 140, 0) == "green"
+    assert eng._route_status("R1", 40, 5) == "green"            # -70 %, but 40 min left: no warning
+    assert eng._route_status("R2", 9, 0) == "green"
+    assert eng._route_status("R2", 6, 5) == "amber"             # -33 % with under 10 min left: closing fast
+
+
 def test_state_is_json_serialisable():
     eng = engine()
     feed(eng, 0, **SHIFT)

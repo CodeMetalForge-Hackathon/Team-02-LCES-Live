@@ -34,6 +34,15 @@ BURNOUT_S = 300             # a cell burns this long after the fire reaches it, 
 SLOPE_BAND_DEG = 5           # spread rates cached per (fuel, slope band, aspect band, direction) (§2.4)
 ASPECT_BAND_DEG = 22.5
 FIRE_MERGE_M = 30            # a new fire point within this distance of an existing one is the same fire
+# Hot sensor node rule (§1.4): a reading >= HOT_TEMP_C, or a rise of more than HOT_RISE_C within HOT_RISE_S,
+# puts a fire point at the node (hair dryer). DHT11 tops out near 50 C: tune on the day.
+HOT_TEMP_C = 45.0
+HOT_RISE_C = 8.0
+HOT_RISE_S = 30.0
+# A route the fire bends off its fire-blind path is announced ("re-planned around the fire") when it moves more
+# than ROUTE_CHANGE_M from the last announced path, at most once per ROUTE_CHANGE_HOLD_S (it re-plans every step).
+ROUTE_CHANGE_M = 50.0
+ROUTE_CHANGE_HOLD_S = 20.0
 
 # ---- Crew model (§4) --------------------------------------------------------
 ROUTE_STEP_M = 25            # routes are densified to this spacing (§4.2: segmentize ~25 m)
@@ -55,6 +64,7 @@ GREEN_MIN = 5.0              # margin >= 5 min -> green
 RED_MIN = 2.0                # margin < 2 min -> red (+ reroute + alert)
 DROP_AMBER_FRACTION = 0.30   # margin dropped > 30 % within DROP_WINDOW_S -> amber
 DROP_WINDOW_S = 30
+DROP_AMBER_BELOW_MIN = 10.0  # ... only while the margin is under this (140 -> 40 min is no warning)
 LEAVE_BUFFER_MIN = 2.0       # leave-by = now + margin - buffer (§5 step 7)
 
 # ---- Node health (§5.1) and worst case (§5.3) -------------------------------

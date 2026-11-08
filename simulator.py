@@ -18,6 +18,8 @@ parser.add_argument("--silent-after", type=int, default=90)
 parser.add_argument("--fire-node", default="N2", help="spot fire placed at this node's position")
 parser.add_argument("--fire-after", type=int, default=-1,
                     help="seconds until one spot fire is reported (-1 = never; e.g. 20)")
+parser.add_argument("--hot-after", type=int, default=-1,
+                    help="seconds until --fire-node reads 55 C (hair dryer: engine hot-sensor rule; -1 = never)")
 args = parser.parse_args()
 fire_sent = False
 
@@ -38,7 +40,9 @@ try:
                 continue
             payload = {
                 "type": "wx", "node": node, "seq": sequence[node],
-                "temp_c": round(random.uniform(28, 33) + (4 if shifted else 0), 1),
+                # noise + shift stay under the hot-sensor rule (+8 C in 30 s)
+                "temp_c": 55.0 if node == args.fire_node and 0 <= args.hot_after <= elapsed
+                          else round(random.uniform(30, 32) + (3 if shifted else 0), 1),
                 "rh": round(random.uniform(15, 22) - (5 if shifted else 0), 1),
                 "wind_ms": round(random.uniform(2, 3) + (5 if shifted else 0), 1),
                 "wind_dir": wind_dir, "flame": 0, "batt": 90,

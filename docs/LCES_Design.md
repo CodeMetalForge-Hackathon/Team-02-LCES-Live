@@ -435,7 +435,7 @@ Every recompute (on each incoming message, and at least every 5 s):
 5. **Close** a cell if `t_fire < t_crew`, **or** it is burning, **or** it lies within 4 × flame length of a burning cell (60–80 ft flames ≈ 75–100 m). Drop the edges touching closed cells and run Dijkstra again.
 6. **Escape routes:** one per safety zone (ranch; any black cell). Margin of a route = `min over its cells (t_fire − t_crew)`; black cells count as unlimited. The safety zone's own cells are included.
 7. A detour reaches later cells later, so repeat 5–6 once or twice until the routes stop changing. **No path left → "no safe route" alert.**
-8. **Active route** = the fastest escape route that isn't red, picked once at Start; after that it changes only by a reroute (decided Nov 8, §5.7). **Reroute** = the active route turns red and another safety zone's route isn't (path changes within the same zone don't raise an alert yet).
+8. **Active route** = the fastest escape route that isn't red, picked once at Start; after that it changes only by a reroute (decided Nov 8, §5.7). **Reroute** = the active route turns red and another safety zone's route isn't. A route the fire bends off its fire-blind path (closures) raises "Route <id> re-planned around the fire" and sets that route's `replanned_ts`, when it moved > `ROUTE_CHANGE_M` (50 m) from the last announced path, at most once per `ROUTE_CHANGE_HOLD_S` (20 s) (Nov 8, ticket 17).
 9. **Leave-by time** = `now + margin − buffer`, shown as a countdown.
 10. Publish `engine/state` (§5.5); `ws_server.py` forwards it to the dashboard.
 
@@ -447,7 +447,7 @@ Every recompute (on each incoming message, and at least every 5 s):
 | Status | Rule |
 |---|---|
 | Green | margin ≥ 5 min |
-| Amber | 2 min ≤ margin < 5 min, **or** margin dropped > 30% since the last update |
+| Amber | 2 min ≤ margin < 5 min, **or** margin dropped > 30% within 30 s while under 10 min (`DROP_AMBER_BELOW_MIN`, Nov 8: a drop from 140 to 40 min showed amber with 40 min left) |
 | Red | margin < 2 min → reroute + alert (the 2013 crew had under 2 min of warning, SAIT p.78) |
 | Aging (sensor node) | 1 missed heartbeat at **that sensor's own interval** |
 | Stale (sensor node) | 3 missed heartbeats at its own interval (30 s for N2/N3; 3 × the measured interval for N1, §1.3) |
@@ -564,7 +564,7 @@ Verified Sun Nov 8 with the placeholder data (local Mosquitto + simulator, ~30 m
 | Routes | Hand-drawn LineStrings `R1`/`R2`, each evaluated alone | scipy Dijkstra over the 10 m grid + OSM trails; one escape route per safety zone (`ranch`, `black`) (ADR 0001) |
 | Fire spread | Straight line from each fire point, no history | Minimum travel time on the grid with history (ADR 0002); starts from the black |
 | Safety zones | Placeholder A/B with `sz_radius_m` | Boulder Springs Ranch (100 m) and the black |
-| Fire trigger | `"flame": 1` in a `wx` message; 30 m merge | Hot-sensor rule (≥ 45 °C or +8 °C in 30 s); at most one fire point per sensor node |
+| Fire trigger | `"flame": 1` in a `wx` message; 30 m merge; **hot-sensor rule done Nov 8 (ticket 17)**, hot nodes left out of temp/RH | Hot-sensor rule (≥ 45 °C or +8 °C in 30 s); at most one fire point per sensor node |
 | Reset / ignite | `engine/cmd` | **Done Nov 8:** dashboard Start / Reset / Ignite at N2 → `POST /api/cmd` → `engine/cmd` (§5.7) |
 | Wind | Highest wind across all nodes, unscaled; **each node's wind smoothed (20 s moving average, Nov 8)** | N1 only, × `WIND_SCALE` (4) |
 | Moisture | Hottest / driest fresh node | Same, but a node with a fire point is excluded |
@@ -584,7 +584,7 @@ Spec and tickets: `docs/specs/demo-dashboard/` (01–06, 09, 10, 13–15 resolve
 - **Wind smoothing.** N1's readings jump (fan gusts, vane). Per node, an exponential moving average with time constant `WIND_SMOOTH_S` = 20 s; direction averaged as a unit vector (350° and 10° → 0°); direction rounded to `WIND_DIR_STEP_DEG` = 5°, speed rounded up to 0.5 m/s. The fire model and `weather.wind_from` use the smoothed values. A sharp change takes ~30–40 s to show fully. Each 5° step still rebuilds the spread table (~250 ms on the laptop); raise the step to 10° if the Pi is slow.
 - **Crew walk** (spec story 35, done differently). After Start the crew moves along the **active route** at the modelled walking times (`seg_s`), projected onto the route polyline each step; routes are then re-planned from the new position, so ETA and margins update as the crew walks. ~1.1 m/s on the black route (~330 m in 5 min; the black is ~19 min away). A real `crew/<id>/pos` message stops the simulated walk until Reset. "Crew reached <zone>" on arrival. `CREW_WALK` in `config.py`.
 - **Command path.** `ws_server.py` `POST /api/cmd` (`start` / `reset` / `fire` only, else 400; 503 without MQTT) publishes the body to `engine/cmd`. No auth (closed FireNet). CORS open so the Vite dev server can call it.
-- **`engine/state` additions:** `phase` (`ready`/`running`), `started_ts`, `scenario_start` ("16:20"), `replan_ts` (Start or last reroute); per route `t_crew_min` / `t_fire_min` (minutes from `ts` per `path` point; `null` before the crew's join point or where the fire never arrives; `t_fire_min` includes the 1.5 safety factor; min of the difference = `margin_min`); `crew.walking`, `crew.arrived`. Adds ~1.5 KB to a ~60 KB message (`areas` is ~52 KB).
+- **`engine/state` additions:** `phase` (`ready`/`running`), `started_ts`, `scenario_start` ("16:20"), `replan_ts` (Start or last reroute); per route `t_crew_min` / `t_fire_min` (minutes from `ts` per `path` point; `null` before the crew's join point or where the fire never arrives; `t_fire_min` includes the 1.5 safety factor; min of the difference = `margin_min`); `crew.walking`, `crew.arrived`; per route `replanned_ts` (ticket 17). Adds ~1.5 KB to a ~60 KB message (`areas` is ~52 KB).
 
 **Results on the 2013 data** (from the descent point; 60 s of SSW 2.5 m/s, then the shift; margins 1 / 3 / 5 min after):
 

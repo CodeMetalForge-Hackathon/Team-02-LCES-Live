@@ -24,6 +24,7 @@ export type EngineState = {
   routes?: {
     id: string; name?: string; to?: string; margin_min: number | null; status: RouteStatus; active: boolean;
     eta_min?: number; path?: [number, number][];
+    replanned_ts?: number | null;  // unix s the fire last bent this route somewhere new (engine announce_detours)
     // minutes from ts per path point; null = before the crew joins / fire never gets there
     t_crew_min?: (number | null)[]; t_fire_min?: (number | null)[];
   }[];
