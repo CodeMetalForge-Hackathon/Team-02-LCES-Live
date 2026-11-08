@@ -9,7 +9,7 @@ Core question the system answers, continuously:
 **Event:** Code Metal Forge 2026 ("Operation Lost and Found"), BASE-X Boston, sponsored by USSOCOM. Build Sat 10:00 → submissions Sun 12:00, then live demos. Judged on mission relevance, a working live demo, deployability.
 **Objectives fit:** strong on Map changing conditions and Deliver critical information, good on Detect hazards, weak on Locate people unless we add the crew tag / "can rescuers still reach the trapped hiker safely" angle.
 **Pitch wording:** the 2013 Yarnell Hill investigation (19 firefighters died) highlighted gaps in real-time weather, fire and crew-location information; our system targets those gaps. **Do not claim it would have prevented the tragedy.**
-**Demo:** tabletop terrain model. A fan simulates a wind shift, a hair dryer / heat gun (never open flame) simulates a spot fire. Margin collapses, route flips green → red, an alternate route appears, an alert fires.
+**Demo:** sensor nodes spread a couple of metres apart on the floor, each given a **fake GPS position** at a real Yarnell spot (§1.4); the Yarnell map is on a screen. A fan simulates a wind shift, a hair dryer / heat gun (never open flame) simulates a spot fire. Margin collapses, route flips green → red, an alternate route appears, an alert fires.
 
 ---
 
@@ -26,13 +26,13 @@ Core question the system answers, continuously:
 | Simulator (fake N1–N3) | Running, verified | Vivek | Teammates copy it for local dev |
 | PostGIS database + ingest | **Real node data ingested and verified** (Nov 7) | Teammate | Re-apply `schema.sql` (drops the seq constraint) |
 | WebSocket server (FastAPI) | **Implemented and verified locally with simulator data** | Teammate | Connect the MapLibre dashboard; verify against real Pi MQTT messages |
-| Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, tabletop crop, travel factor from EVC/EVH, load into PostGIS |
+| Yarnell map data (`data/fetch_yarnell.py` → `data/yarnell/`) | **Done and cross-checked:** 5×5 km, 10 m grid, EPSG:32612: DEM, slope, aspect, hillshade, LF2025 fuel, 2013 perimeter, OSM, key sites; LFPS download has EVC/EVH/EVT too (§3.1) | — | §3.2: ranch + escape route + wind timeline from the report, routing crop + node GPS positions, travel factor from EVC/EVH, load into PostGIS |
 | Dashboard (MapLibre) | Not started | TBD | Consume the WebSocket feed |
 | Margin engine | Not started | Vivek | After ingest: staleness, trail graph, fire/escape model |
 | Flame sensor | Not started | TBD | — |
 | LoRa link | Not started | TBD | Module model unknown; RadioLib likely |
 | Thermal lookout | Not started | TBD | Get the thermal camera from the shared library first |
-| Tabletop terrain model | Not started | TBD | Cardboard/foam; photo from above becomes the map |
+| Node placement (fake GPS per node, §1.4) | Not started | TBD | Pick a Yarnell lat/lon per node once the ranch and crew route are pulled from the investigation report (§3.2) |
 
 ---
 
@@ -43,7 +43,7 @@ Core question the system answers, continuously:
 ESP32 nodes (temp, RH, flame) ─────────────MQTT─┐
 La Crosse wind sensor ─433 MHz─ SDR + rtl_433 ──┤  sensors/<node>/wx
    (wind_bridge.py)                             │
-Thermal lookout (hot spot → tabletop x,y) ──────┤  sensors/<src>/fire
+Thermal lookout (hot spot → node id) ───────────┤  sensors/<src>/fire
 Crew tag (optional) ────────────────────────────┤  crew/<id>/pos
                                                 ▼
                                Mosquitto on the Pi (10.42.1.1)
@@ -68,15 +68,16 @@ Recompute on every new reading or detection (target: < 2 s end to end).
 | Topic | Sent by | Content |
 |---|---|---|
 | `sensors/<node>/wx` | Sensor nodes, wind bridge, simulator | Weather heartbeat (every 10 s for ESP32 nodes; N1 per radio packet, §1.3) |
-| `sensors/<src>/fire` | Thermal lookout | Spot-fire event with tabletop position |
+| `sensors/<src>/fire` | Thermal lookout | Spot-fire event, placed at the detecting node's position (or explicit lat/lon) |
 | `crew/<id>/pos` | Crew tag (optional) | Crew position |
 | `engine/state` | Margin engine | Route margins and colours (format TBD) |
 
 JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds its own receive time.
 ```json
 {"type":"wx","node":"N1","seq":184,"temp_c":31.2,"rh":18.0,"wind_ms":-1,"wind_dir":-1,"flame":-1,"batt":-1}
-{"type":"fire","src":"THERM1","x":42.0,"y":18.5,"conf":0.9}
-{"type":"crew","id":"C1","x":10.0,"y":55.0}
+{"type":"fire","src":"THERM1","node":"N2","conf":0.9}
+{"type":"fire","src":"THERM1","lat":34.2215,"lon":-112.7790,"conf":0.9}
+{"type":"crew","id":"C1","lat":34.2214,"lon":-112.7822}
 ```
 - `seq` counts heartbeats per node. `wind_dir` = direction the wind blows **from**, degrees. `wind_ms` = m/s.
 - **Demo nodes (3):** `N1` = La Crosse sensor via SDR, sends **temp, RH, wind speed and wind direction** (§1.3). `N2` = ESP32-S3 + DHT11, sends **temp and RH** only (§8.3.1). `N3` = ESP32-C5 + DHT11, sends **temp and RH** only (§8.3.2). The simulator also uses `N1`–`N3` (§8.4).
@@ -137,7 +138,7 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 - One-time on the host: `blacklist dvb_usb_rtl28xxu` in `/etc/modprobe.d/` (else the TV-tuner kernel driver grabs the dongle).
 - `usb_claim_interface error -6` = another program already has the dongle open (we hit this with a leftover `rtl_433` test run). Stop it (Ctrl+C or `kill <pid>`) and run again.
 - **Sensor id changes when the batteries come out.** Run plain `rtl_433 -f 433.92M -R 73 -F json`, read the new `id`, update `SENSOR_ID`. The sensor sends a burst right after battery insertion.
-- **Direction depends on mounting:** the vane reads relative to the housing. The label says the solar panel must face **south**. On the tabletop, either face it south or set `DIR_OFFSET`.
+- **Direction depends on mounting:** the vane reads relative to the housing. The label says the solar panel must face **south**. On the floor, either face it to real south or set `DIR_OFFSET` (mark north on the floor; the fan's direction must match compass directions).
 - The Python MQTT library (`python3-paho-mqtt`) must be installed before joining FireNet, which has no internet.
 - For the demo, plan to move the SDR to the Pi (install `rtl-433` while the Pi still has internet, copy `wind_bridge.py` to `~/fire`, run with `uv run python wind_bridge.py`; default `MQTT_HOST=localhost`). **Not done yet.**
 
@@ -146,17 +147,16 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 - [ ] Transmit interval: time between consecutive `sensors/N1/wx` messages. If it is longer than ~10 s, the 3-heartbeat stale rule (§5.1) needs a per-node threshold for N1.
 
 ### 1.4 Coordinates
-**Messages use tabletop centimetres; the engine computes in real metres.**
-- All messages and positions (nodes, trails, safety zones, hot spots, crew) are tabletop **cm, (x, y) from one corner**.
-- The fire and crew models need real units (spread rate and Tobler speed are in km/h, slope and fuel come from real rasters). So the engine maps the table onto a real Yarnell Hill patch in **EPSG:32612 (UTM zone 12N, metres)** with one transform, in one place:
-  ```
-  east_m  = E0 + x_cm * SCALE
-  north_m = N0 + y_cm * SCALE        (check the y sign: table corner vs. map north)
-  ```
-  Example only: 1 cm = 20 m makes a 100 cm table = 2 km × 2 km, the routing grid size in §4.1.
-- Reproject every raster input to EPSG:32612 on load. Lengths, distances and costs all assume metres.
-- **Fallback** if the DEM/LANDFIRE load is not ready: single fuel (SH5) and flat ground over the same scaled metres. Units stay real; only the terrain detail is lost.
-- **To decide (team):** table size in cm, `SCALE` (m per cm), origin `E0/N0` (which Yarnell patch, which corner is (0,0)), and whether the foam model is shaped after that patch's real terrain.
+**Decision (Nov 7): no tabletop model, no scale.** Each node gets a **fake GPS position** at a real Yarnell spot. All positions are real coordinates; the room's layout doesn't matter except for spacing (below).
+- **Nodes:** a config file maps node id → lat/lon (e.g. ridge, saddle, near the ranch). The engine/ingest fills `nodes.geom` from it. Positions get picked once the ranch and crew route are pulled from the investigation report (§3.2).
+- **Spot fire:** when a node's flame sensor, or the thermal camera aimed at a node, detects heat, the fire point is placed **at that node's position** (`"node":"N2"`), or at an explicit `lat/lon` (e.g. a preset ignition point).
+- **Crew:** fixed fake lat/lon (on the ridge), or moved along the route by the simulator or a button.
+- **Wind:** the fan blows on the real sensor; the reading counts as the wind at N1's position. **North still matters:** mark north on the floor, or set `DIR_OFFSET` once (§1.3).
+- **Floor space:** only for spacing nodes far enough apart (a couple of metres) that the fan or heat gun hits one node and not the others, so each reads differently.
+- **Messages carry lat/lon (EPSG:4326);** the engine converts to **EPSG:32612 (UTM 12N, metres)** with one `pyproj` transform in one place, because the fire and crew models need metres (spread rate and Tobler speed in km/h, rasters in metres). Reproject every raster input to EPSG:32612 on load.
+- **Routing crop:** the graph covers a 2 km × 2 km square inside the 5 km data patch (§3.1, §4.1), containing the ridge, the deployment site and the ranch. Yarnell town (~2.8 km east of the deployment site) stays outside. Exact bounds follow from the ranch location.
+- **Fallback** if the DEM/LANDFIRE load is not ready: single fuel (SH5) and flat ground in real metres. Only the terrain detail is lost.
+- Dropped with the tabletop: table size, `SCALE`, origin `E0/N0`, foam terrain.
 
 ---
 
@@ -225,7 +225,7 @@ Head ROS ≈ 10% of 10-m open wind speed (Cruz & Alexander 2019, **forests and s
 ## 3. Terrain and fuel data (static, loaded once)
 
 ### 3.1 Yarnell patch: done (Nov 7)
-**Patch:** 5 km × 5 km, 10 m grid (500 × 500), **EPSG:32612**, bounds `334640 3785520 339640 3790520` (lon/lat ≈ 34.1976–34.2434 N, −112.7956 to −112.7404). It covers the deployment site, the ridge above it, the Hotshot Journey trailhead and Yarnell town. The tabletop's 2 km × 2 km gets cropped from it (§1.4).
+**Patch:** 5 km × 5 km, 10 m grid (500 × 500), **EPSG:32612**, bounds `334640 3785520 339640 3790520` (lon/lat ≈ 34.1976–34.2434 N, −112.7956 to −112.7404). It covers the deployment site, the ridge above it, the Hotshot Journey trailhead and Yarnell town. The 2 km × 2 km routing crop is taken from it (§1.4).
 
 Rebuild (needs internet, no GDAL install needed; rasterio bundles it): `uv run --with rasterio --with pyproj python data/fetch_yarnell.py` → `data/yarnell/`
 
@@ -260,10 +260,12 @@ Rebuild (needs internet, no GDAL install needed; rasterio bundles it): `uv run -
 **Fuel decision:** 2013 replay → SH5 inside the 2013 perimeter (pre-fire chaparral, as the investigation describes). "If it happened today" → LF2025 `fuel.tif` as is.
 
 ### 3.2 Yarnell: left to do
+The ordered plan is in §9 (Map + routing track); this list keeps the data-specific details.
 - [ ] Put EVC/EVH/EVT on the 10 m grid (nearest neighbour from the LFPS download) and turn shrub height × cover into the off-trail travel factor (replaces the placeholder per-fuel factors in §4.3).
 - [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LFPS rasters (`gdalwarp -r bilinear` / `-r near`); keep the ImageServers as a cross-check.
 - [ ] From the Yarnell Hill investigation report: Boulder Springs Ranch (the 2013 safety zone; **not in OSM, don't guess**), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed).
-- [ ] Choose the tabletop's 2 km × 2 km crop and `SCALE`/`E0`/`N0` (§1.4).
+- [ ] Choose the 2 km × 2 km routing crop and each node's fake GPS position (§1.4).
+- [ ] Hand-drawn escape routes as lon/lat GeoJSON (`data/yarnell/routes.geojson`).
 - [ ] Load rasters (`raster2pgsql`, ships with PostGIS on the Pi) and GeoJSON (`ogr2ogr`, or psycopg + `ST_GeomFromGeoJSON`) into PostGIS.
 - [ ] SH5 override inside the perimeter for the 2013 replay (one flag in `config.py`).
 - [ ] Optional: offline street basemap (PMTiles); 1 m lidar hillshade.
@@ -297,11 +299,11 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
 ## 4. Crew model (routing)
 
 ### 4.1 Graph: two layers joined together
-1. **Trail graph.** Demo: **hand-drawn** on the tabletop map (2–3 routes + alternates, snapped at junctions), digitised in tabletop cm and transformed (§1.4). Later: OSM via `osm2pgrouting`, or USFS trails + `pgr_extractVertices`. Check OSM coverage at Yarnell before relying on it.
+1. **Trail graph.** Demo: **hand-drawn** on the Yarnell map (2–3 routes + alternates, snapped at junctions), e.g. in QGIS or geojson.io, saved as lon/lat GeoJSON. Later: OSM via `osm2pgrouting`, or USFS trails + `pgr_extractVertices`. Check OSM coverage at Yarnell before relying on it.
 2. **Off-trail grid graph.** Every 10 m DEM cell is a node with 8 neighbours (16 with knight moves, for smoother paths). Join trail vertices to the nearest grid cells.
 
 **How the grid is built** (`build_graph.py`, Python + numpy, written to PostGIS with `COPY`; runs once):
-- **Area:** only the tabletop's 2 km × 2 km crop (§1.4), not the full 5 km patch: 200 × 200 = **40,000 nodes**. The full patch would be 250k nodes / ~1M edges, and pgRouting reloads every edge on every query, too slow for the < 2 s target.
+- **Area:** only the 2 km × 2 km routing crop (§1.4), not the full 5 km patch: 200 × 200 = **40,000 nodes**. The full patch would be 250k nodes / ~1M edges, and pgRouting reloads every edge on every query, too slow for the < 2 s target.
 - **Nodes (`grid_nodes`):** one per cell centre. `id = row * 200 + col`, `geom` = cell centre, `elev` from the DEM, `veg_factor` from §4.3.
 - **Edges (`grid_edges`):** store only 4 of the 8 directions per node (E, SE, S, SW); the other 4 are the same edges seen from the neighbour. Each row has `cost` (source → target) and `reverse_cost` (target → source). ≈ 160k rows.
   ```
@@ -310,7 +312,7 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
      SW  S  SE
   ```
 - **Impassable** (cost `-1`): slope > 38°, water/buildings (OSM polygons stamped onto the grid), diagonal corner-cutting past an impassable cell. Vegetation is **never** impassable (§4.3).
-- **Trails:** OSM roads/tracks/trails + the hand-drawn tabletop routes, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing runs over `grid_edges UNION ALL trails UNION ALL connectors`.
+- **Trails:** OSM roads/tracks/trails + the hand-drawn routes, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing runs over `grid_edges UNION ALL trails UNION ALL connectors`.
 - Crew position and safety zones are **snapped** to their nearest node: `SELECT id FROM grid_nodes ORDER BY geom <-> pt LIMIT 1`.
 
 Why both: crews mostly use trails, but Yarnell's crew went cross-country, so a trail-only graph can't represent that.
@@ -466,7 +468,7 @@ SELECT * FROM pgr_dijkstra(
 ---
 
 ## 6. Data model (PostGIS database `fire` on the Pi)
-- `nodes(id, geom, label)`: positions entered once (tabletop cm → §1.4)
+- `nodes(id, geom, label)`: positions from the fake-GPS node config (§1.4)
 - `readings(...)`: one row per `wx` message plus the Pi's receive time. **Columns not fixed yet** (`ingest.py` defines them)
 - `fire_points(...)`: from `sensors/<src>/fire`
 - `trails(..., dz, cost, reverse_cost, scouted bool, no_go bool)`
@@ -480,9 +482,9 @@ SELECT * FROM pgr_dijkstra(
 
 `schema.sql` now defines the following initial columns. This does not replace the planned routing/static-data tables above; it is the live sensor-ingestion foundation.
 
-- `nodes(id TEXT PRIMARY KEY, label, x_cm, y_cm, geom geometry(Point,32612), last_seen)`. The `geom` field is reserved and remains NULL until the tabletop-to-UTM transform is agreed.
+- `nodes(id TEXT PRIMARY KEY, label, x_cm, y_cm, geom geometry(Point,32612), last_seen)`. Positions now come from fake GPS (§1.4): fill `geom` from the node config; `x_cm`/`y_cm` are unused and can be dropped at the next schema change.
 - `readings(id, node_id, seq, temp_c, rh, wind_ms, wind_dir, flame, batt, received_at, raw JSONB)`. `received_at` is the database receipt time. `(node_id, seq)` is unique, making the current weather message insert idempotent across reconnects.
-- `fire_points(id, source, x_cm, y_cm, confidence, geom geometry(Point,32612), received_at, raw JSONB)`. The table exists but `ingest.py` deliberately does not persist fire events yet.
+- `fire_points(id, source, x_cm, y_cm (unused now, §1.4), confidence, geom geometry(Point,32612), received_at, raw JSONB)`. The table exists but `ingest.py` deliberately does not persist fire events yet.
 
 Apply on the Pi after setting `DATABASE_URL` in `.env`:
 
@@ -669,26 +671,41 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 **Next steps**
 - [x] ESP32-S3 node: on FireNet, publishing heartbeats (as `N2`, verified Sat Nov 7)
 - [x] ESP32-C5 node `N3`: PlatformIO setup, on FireNet, heartbeats on the Pi broker (verified Sat Nov 7)
-DHT11: keep upstream’s line. It’s done and verified, so your “fix wiring” item is out of date.
-Wi-Fi rejoin: keep it. Only upstream has it.
-Backend reboot fix: keep your checked [x]. Upstream still shows it as open.
-Real node data: keep it. Only your stash has it.
 - [ ] N1 (La Crosse): fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
 - [x] Local PostGIS schema + `ingest.py` (MQTT → database) implemented and verified with simulator data
 - [x] `ws_server.py` working locally against the simulator; latest-message HTTP cache verified
 - [ ] Deploy the committed schema, `ingest.py`, and `ws_server.py` to the Pi; verify real MQTT messages reach both the database and WebSocket dashboard
 - [ ] Staleness monitor (fresh / aging / stale from `last_seen`) + worst-case values (§5.3)
-- [ ] Decide the tabletop ↔ UTM transform (§1.4)
-- [ ] Trail graph for the tabletop in PostGIS + pgRouting, then the margin engine
+- [x] Coordinates decided: fake GPS per node, no tabletop transform (§1.4)
+- [ ] Map + routing track: see the ordered list below
 - [ ] Build pyrothermel on the Pi 5
 - [x] Download LANDFIRE + 3DEP DEM for the Yarnell patch, reproject to EPSG:32612 (§3.1)
-- [ ] Yarnell data follow-ups: ranch/route/wind timeline from the report, travel factor from EVC/EVH, load into PostGIS (§3.2)
 - [ ] RH/temp → 1-h fuel moisture table
 - [ ] Grab the thermal camera, LoRa modules and ESP32s from the shared library
-- [ ] Questions for the operator mentor: travel speed in chaparral vs trail, acceptable margin thresholds, a quote for the pitch
+- [ ] Questions for the operator mentor: travel speed in chaparral vs trail (calibrate the vegetation table in §4.3), acceptable margin thresholds, a quote for the pitch
+
+**Map + routing track (suggested order; 3–5 can run in parallel)**
+1. [ ] **Pull 2013 facts from the SAIT report** (§10; ADOSH report as cross-check, opens in a browser): Boulder Springs Ranch location (the 2013 safety zone, not in OSM), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed). Add the points to `data/yarnell/sites.geojson` with the report page as source; the timeline goes in a scenario file for the simulator.
+2. [ ] **Pick the 2 km × 2 km routing crop** (ridge + deployment site + ranch) **and each node's fake GPS position** (§1.4). Write a node config (e.g. `data/yarnell/nodes.json`: id → lat/lon, label); `ingest.py` fills `nodes.geom` from it.
+3. [ ] **Hand-draw 2–3 escape routes + alternates** on the Yarnell map (QGIS or geojson.io) → `data/yarnell/routes.geojson` (lon/lat).
+4. [ ] **Vegetation onto the grid:** EVC/EVH → `veg_factor` with the §4.3 lookup table; `config.py` flag for the 2013 replay (SH5 fuel + factor 0.1 inside the 2013 perimeter).
+5. [ ] **Decide pgRouting vs scipy** for routing (§4.6).
+6. [ ] **`build_graph.py`:** `grid_nodes`, `grid_edges`, trails + connector edges for the crop (§4.1), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
+7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
+8. [ ] **Margin engine with fire closures** (`fire_blocked`, §5.4), with the margin checks in §7.
+9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, nodes, active route coloured by margin.
+
+**Housekeeping**
+- [ ] Move `docs/USGS_13_n35w113.tif` (440 MB) to `data/raw/` and add `data/raw/` to `.gitignore`.
+- [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LANDFIRE download; keep the online services as a cross-check (§3.2).
+- [ ] Mark north on the floor where the wind sensor sits (fan directions must match compass directions; §1.3, §1.4).
+- [ ] Verify the vegetation-height safety zone formula (Butler 2014 / NWCG) against the source before using it (§2.5).
+- [ ] `schema.sql`: drop the unused `x_cm`/`y_cm` columns at the next schema change (§6.1).
 
 **Open questions**
-- Tabletop size, `SCALE`, origin `E0/N0`, and Yarnell patch (§1.4).
+- Fake GPS position per node and the exact 2 km routing crop (§1.4); depends on the ranch location from the investigation report.
+- Routing engine: pgRouting (SQL, same database) or scipy (in memory, milliseconds)? (§4.6)
+- Demo scenario: 2013 replay (SH5, old chaparral) or "if it happened today" (LF2025 fuels), or both? (§3.1)
 - Worst-case numbers `WORST_WIND_MS`, `WORST_TEMP_C`, `WORST_RH` (§5.3).
 - N1 (La Crosse) transmit interval, and whether its `wind_dir` is "from" (§1.3).
 - `batt` units: the simulator sends 90 (percent?); N1 (La Crosse) sends 100/10 for ok/low; N2 and N3 send -1. Proposal: percent 0–100, -1 = unknown (all current senders already fit). Confirm what the dashboard expects.
@@ -729,6 +746,13 @@ Real node data: keep it. Only your stash has it.
 - Cova, Dennison et al. (2005), "Setting wildfire evacuation trigger points using fire spread modeling and GIS", *Transactions in GIS* 9(4).
 - Campbell, Dennison & Butler (2017), LiDAR-based travel rates for escape-route mapping, *IJWF*; and crowdsourced slope/travel-rate model, *Applied Geography*.
 - Tobler (1993), hiking function.
+
+**Yarnell Hill 2013 (for the ranch, crew route, positions and wind timeline)**
+- Arizona State Forestry, *Yarnell Hill Fire Serious Accident Investigation Report* (SAIT), Sept 23, 2013. The official state report: timeline, maps, weather, deployment site. Mirror on the Wildland Fire Lessons Learned Center (verified downloadable, 6.6 MB): https://lessonslearned-prod-media-bucket.s3.us-gov-west-1.amazonaws.com/s3fs-public/irdoc/Yarnell_Hill_Fire_Investigation_Report.pdf
+- Wildland Fire Associates for ADOSH, *Granite Mountain IHC Entrapment and Burnover Investigation*, Dec 2013. Independent occupational-safety investigation; more critical of the agency; own timeline, weather data and maps. ASU library copy (opens in a browser, blocks scripts): https://prism.lib.asu.edu/system/files/c16/106328/Granite_Mountain_IHC_Entrapment_and_Burnover_Investigation.pdf
+- AZ DFFM press release on the SAIT report: https://dffm.az.gov/node/96
+- *Yarnell Hill Staff Ride* (State of Arizona, interagency, since 2017): field-study guide with site-by-site detail; obtained by Phoenix New Times via public records, no confirmed public copy yet.
+- Positions: use the reports' maps cross-checked against `data/yarnell/` (hillshade, perimeter, OSM sites). If the two reports disagree, note both.
 
 **Software and data**
 - pyrothermel: https://github.com/j-tenny/pyrothermel · Behave: https://github.com/firelab/behave
