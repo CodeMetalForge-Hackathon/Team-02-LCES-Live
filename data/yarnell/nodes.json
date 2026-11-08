@@ -1,0 +1,17 @@
+{
+ "N1": {
+  "lat": 34.220686,
+  "lon": -112.782569,
+  "label": "Ridge near the descent point (wind, high and exposed)"
+ },
+ "N2": {
+  "lat": 34.220697,
+  "lon": -112.77893,
+  "label": "Box canyon, on the 2013 descent line"
+ },
+ "N3": {
+  "lat": 34.219997,
+  "lon": -112.774241,
+  "label": "Between the box canyon and Boulder Springs Ranch"
+ }
+}

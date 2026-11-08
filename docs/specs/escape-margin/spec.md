@@ -87,10 +87,10 @@ For the demo (2013 replay, real time): the scenario starts at 16:20 with the cre
 ## Implementation Decisions
 
 **Modules**
-- **Graph builder** (deep module, runs once). In: terrain arrays for the 2 km × 2 km routing area centred at ≈ 34.221 N, −112.777 W (elevation, slope, vegetation travel factor, impassable mask) and OSM trail lines. Out: a saved routing graph (cell UTM coordinates; directed edges with travel time in seconds, each direction its own entry; trail vertices and connector edges; safety-zone cell ids) plus fastest-time / path queries over it.
+- **Graph builder** (deep module, runs once). In: terrain arrays for the 2 km × 2 km routing area centred at ≈ 34.2229 N, −112.7806 W (UTM x0 334990, top 3789300) (elevation, slope, vegetation travel factor, impassable mask) and OSM trail lines. Out: a saved routing graph (cell UTM coordinates; directed edges with travel time in seconds, each direction its own entry; trail vertices and connector edges; safety-zone cell ids) plus fastest-time / path queries over it.
   - Grid edges: 8 neighbours, 10 m / 14.14 m, Tobler speed × min(vegetation factor of both cells); no diagonal corner-cutting past an impassable cell.
   - Trails: OSM roads/tracks only, cut into ~25 m pieces, factor 1.0, linked to the grid by connector edges. The 2013 descent line is not a trail.
-  - Vegetation factor per cell from LANDFIRE shrub height × cover via the lookup table (floor 0.1, never impassable). 2013 replay flag: SH5 fuel and factor 0.1 inside the 2013 perimeter.
+  - Vegetation factor per cell from LANDFIRE shrub height × cover via the lookup table (floor 0.1, never impassable). 2013 replay flag: SH5 fuel and factor 0.6 inside the 2013 perimeter (calibrated: the 2013 descent line, 435 m and −130 m, in ~20 min), and OSM footways dropped (the Hotshot Journey Trail, built 2016, runs down the descent line).
 - **Fire model** (inside the engine). State = one fire arrival clock time per cell. Each recompute: cells already reached are fixed; spread outward from the fire front by Dijkstra on the grid, step time = length / directional spread rate from pyrothermel, cached by (fuel, slope band, aspect band, direction). Initial state: cells in the black polygon reached at scenario start. Cell states: unburned / burning (< 5 min) / the black.
 - **Margin engine** (deep module). One step function: in = routing graph + terrain, latest reading per sensor node with receive times, fire points, crew position, current time, config; out = the engine state message. Steps: hot-sensor rule → fire spread → crew times (no closures) → close cells → route to each safety zone → repeat close/route until stable → margins, colours, active route, alerts, leave-by. A thin MQTT shell around it subscribes to the sensor, fire and crew topics, calls the step on each message and every 5 s, and publishes the engine state.
 - **Scenario simulator** (thin). Publishes the crew position, walking the 2013 descent line from the saddle at 16:20 in real time. Optional fake sensor nodes for offline development stay marked as simulated.
@@ -109,7 +109,7 @@ For the demo (2013 replay, real time): the scenario starts at 16:20 with the cre
 **Other decisions**
 - Routing with scipy in memory; no pgRouting, no closure table (ADR 0001).
 - Fire spread by minimum travel time with history (ADR 0002); straight-line spread dropped.
-- Safety zones: Boulder Springs Ranch (circle, radius 100 m, ≈ 34.2205 N, −112.7716 W) and the black. Crew vehicles are not a safety zone.
+- Safety zones: Boulder Springs Ranch (circle, radius 100 m, ≈ 34.2195 N, −112.7709 W, from SAIT Fig. 7) and the black. Crew vehicles are not a safety zone.
 - One wind for the whole area: N1's speed × wind scale, N1's direction ("from"). One moisture value for the whole area.
 - Stale = 3 missed heartbeats at the sensor's own interval (N1's interval to be measured).
 - Real time, no time compression. Single crew.
@@ -154,6 +154,6 @@ For the demo (2013 replay, real time): the scenario starts at 16:20 with the cre
 - A v1 engine already runs (`engine.py`, `margin.py`, `fire_model.py`, `config.py`, `test_margin.py`): hand-drawn routes, straight-line spread, `engine/cmd`, 14 checks pass. It is the demo fallback; the design doc §5.6 lists every gap between it and this spec.
 - Deadline: submissions Sun Nov 8, 12:00. The riskiest hand-off is the routing graph reaching the engine; fallback is a coarser 20 m grid.
 - Still to tune on the day: hot-sensor thresholds (a DHT11 tops out near 50 °C), wind scale with the real fan, ranch radius against the hillshade.
-- Still to draw by hand from the SAIT report maps: the black at ~16:00 and the 2013 descent line. Still to pick: exact sensor node coordinates.
+- Scenario data done: `data/yarnell/scenario.geojson` (the black at 16:00 from SAIT Fig. 22, the 2013 descent line and key points from Fig. 7) and `data/yarnell/nodes.json`.
 - N1 still needs its fan test (wind "from" convention, direction offset) and transmit interval measured; its stale threshold depends on that interval.
 - pyrothermel has not yet been built on the Pi (aarch64, Python 3.13).

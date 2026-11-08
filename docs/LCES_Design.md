@@ -149,14 +149,14 @@ mosquitto_sub -h 10.42.1.1 -t 'sensors/#' -v
 
 ### 1.4 Coordinates
 **Decision (Nov 7): no tabletop model, no scale.** Each node gets a **fake GPS position** at a real Yarnell spot. All positions are real coordinates; the room's layout doesn't matter except for spacing (below).
-- **Sensor nodes:** `data/yarnell/nodes.json` maps node id → lat/lon + label; the engine/ingest fills `nodes.geom` from it. **Decided Nov 8:** **N1** (wind) on the ridge near the saddle, where a crew would put it (high, exposed); **N2** in the box canyon on the 2013 descent line; **N3** between the canyon and the ranch. Exact lat/lon picked on the map.
+- **Sensor nodes:** `data/yarnell/nodes.json` maps node id → lat/lon + label; the engine/ingest fills `nodes.geom` from it. **Decided Nov 8:** **N1** (wind) on the ridge near the saddle, where a crew would put it (high, exposed); **N2** in the box canyon on the 2013 descent line; **N3** between the canyon and the ranch. Exact lat/lon picked on the map (Nov 8), in `data/yarnell/nodes.json`.
 - **Fire points:** (1) **hot sensor node rule**, in the engine: a fresh reading ≥ 45 °C, or a rise of more than 8 °C within 30 s, creates a fire point at that node's position (hair dryer; DHT11 tops out near 50 °C, so tune on the day); (2) **manual** "ignite" button on the dashboard (stage backup). At most one fire point per sensor node; a node that stays hot keeps its first ignition time. Fire points last until a manual reset.
 - **Crew:** single crew `C1`. The scenario simulator starts it at the **saddle at 16:20** (2013 clock) and walks it down the **2013 descent line** at its computed travel speed, in real time. It keeps walking that line even when the system reroutes: the demo contrasts what happened with what the system advises.
 - **Wind:** the fan blows on the real sensor; **N1's wind applies to the whole area** (one sensor can't tell where the wind changes, so using it everywhere is the safer assumption). The fire model multiplies N1's speed by `WIND_SCALE` (default ×4: a fan gives 3–5 m/s, the 2013 outflow was 13–19 m/s). Engine-only; not shown on the dashboard. **North still matters:** mark north on the floor, or set `DIR_OFFSET` once (§1.3).
 - **Demo runs in real time** (no time compression); wind shifts and new fire points change arrival times instantly.
 - **Floor space:** only for spacing nodes far enough apart (a couple of metres) that the fan or heat gun hits one node and not the others, so each reads differently.
 - **Messages carry lat/lon (EPSG:4326);** the engine converts to **EPSG:32612 (UTM 12N, metres)** with one `pyproj` transform in one place, because the fire and crew models need metres (spread rate and Tobler speed in km/h, rasters in metres). Reproject every raster input to EPSG:32612 on load.
-- **Routing crop:** the graph covers a 2 km × 2 km square inside the 5 km data patch (§3.1, §4.1), **centred at ≈ 34.221 N, −112.777 W** (between the ridge deck and the ranch): ridge, saddle, box canyon, deployment site, ranch and the edge of the black. Yarnell town (~2.8 km east of the deployment site) stays outside. Check the black polygon fits once drawn.
+- **Routing crop:** the graph covers a 2 km × 2 km square inside the 5 km data patch (§3.1, §4.1), **centred at ≈ 34.2229 N, −112.7806 W** (UTM x0 334990, top 3789300; moved 320 m west and 210 m north on Nov 8 so the lunch spot, anchor point and ~2,600 cells of the 16:00 black fit): ridge, descent point, box canyon, deployment site, ranch and the edge of the black. Yarnell town stays outside.
 - **Fallback** if the DEM/LANDFIRE load is not ready: single fuel (SH5) and flat ground in real metres. Only the terrain detail is lost.
 - Dropped with the tabletop: table size, `SCALE`, origin `E0/N0`, foam terrain.
 
@@ -263,13 +263,13 @@ The ordered plan is in §9 (Map + routing track); this list keeps the data-speci
 - [ ] Put EVC/EVH/EVT on the 10 m grid (nearest neighbour from the LFPS download) and turn shrub height × cover into the off-trail travel factor (replaces the placeholder per-fuel factors in §4.3).
 - [ ] Switch `fetch_yarnell.py` to read the local DEM tile and LFPS rasters (`gdalwarp -r bilinear` / `-r near`); keep the ImageServers as a cross-check.
 - [x] From the SAIT report (Nov 8; printed page numbers, PDF page = printed + 6):
-  - **Deployment site:** 34.22047, −112.77757 (p.82). **Ranch:** ~600 yd east of it (p.2, p.31) ≈ 34.2205, −112.7716; size not stated.
+  - **Deployment site:** 34.22047, −112.77757 (p.82). **Ranch:** ~600 yd east of it (p.2, p.31) ≈ 34.2205, −112.7716; size not stated. **Fig. 7 (p.20) puts it at 34.2195, −112.7709** (OSM buildings within 35 m); that is the value used.
   - **Crew:** in the black near the "lunch spot", on the ridge flank (p.21, p.30). Walked SE on the two-track road to the saddle ~16:05–16:20, then down a box canyon: boulders, washes, "pockets of heavy brush", travel under half the road rate (p.30, p.37–38).
   - **Vegetation:** chaparral 3–10 ft, "nearly impenetrable", unburned since 1966 (p.8, p.65).
   - **Wind:** W 10–12 mph ~15:50 (p.25); outflow reached the fire's north end 16:18 (p.29), the south end 16:30: WNW → NNE, 30–40 mph, gusts 43, "50 mph+" in the box canyon (p.64, p.74). Deployment ~16:41; spread 10–12 mph, 60–80 ft flames, under 2 min warning (p.78).
   - **The black:** > 400 acres next to the crew (p.17, p.35). Vehicles moved to the Shrine area ~15:55 (p.24).
-- [ ] Hand-draw **the black at ~16:00** (polygon) and the **2013 descent line** (reference layer) from the report maps → `data/yarnell/scenario.geojson`.
-- [ ] Choose the 2 km × 2 km routing crop and each node's fake GPS position (§1.4).
+- [x] Hand-draw **the black at ~16:00** (polygon) and the **2013 descent line** (reference layer) from the report maps → `data/yarnell/scenario.geojson`.
+- [x] Choose the 2 km × 2 km routing crop and each node's fake GPS position (§1.4).
 - [ ] Load rasters (`raster2pgsql`, ships with PostGIS on the Pi) and GeoJSON (`ogr2ogr`, or psycopg + `ST_GeomFromGeoJSON`) into PostGIS.
 - [ ] SH5 override inside the perimeter for the 2013 replay (one flag in `config.py`).
 - [ ] Optional: offline street basemap (PMTiles); 1 m lidar hillshade.
@@ -316,7 +316,7 @@ SELECT ST_Value(rast, pt) FROM dem WHERE ST_Intersects(rast, pt) LIMIT 1;
      SW  S  SE
   ```
 - **Impassable** (cost `-1`): slope > 38°, water/buildings (OSM polygons stamped onto the grid), diagonal corner-cutting past an impassable cell. Vegetation is **never** impassable (§4.3).
-- **Trails:** OSM roads/tracks/trails, segmentized to ~25 m. Trail vertex ids start at 1,000,000 (no clash with grid ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing (crew times, escape routes, reroutes) always runs over **grid + trails + connectors** together (concatenated edge arrays in `graph.npz`), so an escape route can go cross-country wherever that is faster.
+- **Trails:** OSM roads/tracks/trails, segmentized to ~25 m. Trail vertex ids follow straight after the grid ids (scipy needs dense ids), factor 1.0. **Connector edges** link each trail vertex to its nearest grid node so routes can leave and rejoin trails. Routing (crew times, escape routes, reroutes) always runs over **grid + trails + connectors** together (concatenated edge arrays in `graph.npz`), so an escape route can go cross-country wherever that is faster.
 - Crew position and safety zones are **snapped** to their cell by grid arithmetic (§4.6).
 
 Why both: crews mostly use trails, but Yarnell's crew went cross-country, so a trail-only graph can't represent that.
@@ -371,7 +371,7 @@ Endpoints outside the DEM give NULL dz, so check `WHERE cost IS NULL` after load
 | Water, buildings, fences, slope > 38° | impassable |
 | **Cells the fire reaches before the crew, or within 4 × flame height of the front** | blocked per recompute (§5.4) |
 
-**Yarnell 2025 data:** shrub cover 24–34% (max 51%), height 0.3–1.5 m (max 2.0 m); no shrub cell is both ≥ 50% cover and ≥ 1.5 m. So today's patch is mostly 0.5–0.7. **2013 replay:** cells inside the 2013 perimeter set to 0.1 (old dense chaparral; take the description from the investigation report), via a `config.py` flag.
+**Yarnell 2025 data:** shrub cover 24–34% (max 51%), height 0.3–1.5 m (max 2.0 m); no shrub cell is both ≥ 50% cover and ≥ 1.5 m. So today's patch is mostly 0.5–0.7. **2013 replay:** cells inside the 2013 perimeter set to `REPLAY_VEG` = 0.6 in `build_graph.py`, calibrated so the 2013 descent line (435 m, −130 m) takes ~20 min as in 2013 (16:20 → 16:42); 0.1 gave 124 min. Tobler already slows the steep descent. OSM footways are dropped in replay (Hotshot Journey Trail, 2016, runs down the descent line).
 
 **Worked example**, one 10 m step on flat ground (Tobler ≈ 5.0 km/h):
 
@@ -393,7 +393,7 @@ So a 400 m shortcut through old chaparral costs about as much time as 4 km of tr
 
 ### 4.5 Start and targets (decided Nov 8)
 - Start: latest `crew/C1/pos`, snapped to its cell.
-- **Safety zones:** **Boulder Springs Ranch**, a circle of `RANCH_RADIUS_M` = 100 m around ≈ 34.2205 N, −112.7716 W (SAIT: deployment "approximately 600 yards west of the Ranch", p.2/p.31; size not stated, adjust by eye on the hillshade/OSM buildings), and **the black** (any black cell, §2.4; it grows as the fire burns). Vehicles dropped: they were moved to the Shrine area at ~15:55 (p.24).
+- **Safety zones:** **Boulder Springs Ranch**, a circle of `RANCH_RADIUS_M` = 100 m around ≈ 34.2195 N, −112.7709 W (SAIT Fig. 7; deployment "approximately 600 yards west of the Ranch", p.2/p.31; size not stated, adjust by eye on the hillshade/OSM buildings), and **the black** (any black cell, §2.4; it grows as the fire burns). Vehicles dropped: they were moved to the Shrine area at ~15:55 (p.24).
 - One Dijkstra from the crew gives times to every cell; each safety zone's escape route = the fastest path to any of its cells (`predecessors` gives the path).
 
 ### 4.6 Tool decision: scipy (decided Nov 8, ADR 0001)
@@ -776,11 +776,11 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 
 **Map + routing track (suggested order; 3–5 can run in parallel)**
 1. [x] **Pull 2013 facts from the SAIT report** (done Nov 8, §3.2; still to draw: the black polygon + descent line) (§10; ADOSH report as cross-check, opens in a browser): Boulder Springs Ranch location (the 2013 safety zone, not in OSM), the crew's starting position on the ridge, the route they took, and the wind-shift timeline (time, direction, speed). Add the points to `data/yarnell/sites.geojson` with the report page as source; the timeline goes in a scenario file for the simulator.
-2. [ ] **Routing crop decided** (centre ≈ 34.221, −112.777, §1.4); pick each sensor node's exact lat/lon (N1 ridge near saddle, N2 box canyon, N3 canyon→ranch). Write a node config (e.g. `data/yarnell/nodes.json`: id → lat/lon, label); `ingest.py` fills `nodes.geom` from it.
-3. [ ] **Hand-draw the black (~16:00) and the 2013 descent line** → `data/yarnell/scenario.geojson`; scenario simulator walks the crew from the saddle at 16:20.
-4. [ ] **Vegetation onto the grid:** EVC/EVH → `veg_factor` with the §4.3 lookup table; `config.py` flag for the 2013 replay (SH5 fuel + factor 0.1 inside the 2013 perimeter).
+2. [x] **Routing crop decided** (centre ≈ 34.221, −112.777, §1.4); pick each sensor node's exact lat/lon (N1 ridge near saddle, N2 box canyon, N3 canyon→ranch). Write a node config (e.g. `data/yarnell/nodes.json`: id → lat/lon, label); `ingest.py` fills `nodes.geom` from it.
+3. [x] **Hand-draw the black (~16:00) and the 2013 descent line** → `data/yarnell/scenario.geojson`; scenario simulator walks the crew from the saddle at 16:20.
+4. [x] **Vegetation onto the grid:** EVC/EVH → `veg_factor` with the §4.3 lookup table; `config.py` flag for the 2013 replay (SH5 fuel + factor 0.1 inside the 2013 perimeter).
 5. [x] **Routing engine: scipy** (§4.6, ADR 0001).
-6. [ ] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
+6. [x] **`build_graph.py`:** grid + OSM trails + connector edges for the crop → `graph.npz` (§4.1, §4.6), with the routing checks in §7 (uphill > downhill, detours around barriers, no corner-cutting, trail preferred over brush).
 7. [ ] **Load into PostGIS on the Pi:** rasters with `raster2pgsql`, GeoJSON with `ogr2ogr` or psycopg (§3.1).
 8. [ ] **Margin engine:** fire spread (§2.4) + closures (§5.4) + `engine/state` (§5.5), with the fire and margin checks in §7. A v1 on hand-drawn routes already runs (§5.6); it is the fallback for the demo if the graph isn't ready.
 9. [ ] **Dashboard map layers:** `hillshade.png` (corners in `meta.json`), 2013 perimeter, sites, sensor nodes (age, grey when stale), the black / burning / +5 / +10 min fronts, escape routes coloured by margin, alerts, leave-by countdown, "ignite" and "reset" buttons.
