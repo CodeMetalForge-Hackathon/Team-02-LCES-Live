@@ -20,6 +20,9 @@ RASTERS = {name: DATA / f"{name}.tif" for name in ("dem", "slope", "aspect", "fu
 # "2013": replay with SH5 (old chaparral) everywhere (§3.1 fuel decision, §1.4 fallback).
 # "today": LANDFIRE LF2025 fuel.tif as is.
 SCENARIO = "2013"
+# Route the crew is on at Start: None = the fastest route that isn't red (the black); "ranch" = where the 2013 crew
+# went (a hot N2 then cuts it -> REROUTED ranch -> black). Ignored if that route is red at Start.
+START_ROUTE: str | None = None
 SCENARIO_START = "16:20"     # scenario clock at Start ({"cmd": "start"}); shown as 16:20 + elapsed
 REPLAY_FUEL = 145            # SH5
 NON_BURNABLE = range(91, 100)  # FBFM40 91-99: no spread

@@ -472,6 +472,16 @@ export default function App() {
       <div className="topbar-left">{clock && <div className="clock"><span>SCENARIO</span><b>{clock}</b></div>}</div>
       <div className="topbar-right">
         <div className="controls">
+          {/* crew's route at Start: black = watch routes change with the wind; ranch = the 2013 route, cut -> reroute */}
+          <div className="start-on" role="group" aria-label="Crew starts on">
+            <span>Start on</span>
+            {(["black", "ranch"] as const).map(id => {
+              const on = (engine.start_route ?? "black") === id;
+              return <button key={id} className={on ? "on" : ""} aria-pressed={on} disabled={phase !== "ready"}
+                title={phase === "ready" ? `Crew starts on the route to ${id === "black" ? "the black" : "the ranch"}` : "Reset to change"}
+                onClick={() => !on && sendCmd({ cmd: "plan", route: id })}>{id === "black" ? "Black" : "Ranch"}</button>;
+            })}
+          </div>
           <button className="icon-btn start" disabled={phase !== "ready"} onClick={() => sendCmd({ cmd: "start" })} title={phase === "running" ? "Scenario running" : "Start scenario"} aria-label="Start scenario">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
           </button>

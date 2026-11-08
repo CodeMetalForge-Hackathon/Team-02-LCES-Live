@@ -2,7 +2,7 @@
 
 MQTT in:  sensors/+/wx (weather; flame == 1 = spot fire at that node), sensors/+/fire,
           crew/+/pos, engine/cmd ({"cmd": "start"} | {"cmd": "reset"} | {"cmd": "fire", "node"|"lat"+"lon"} |
-          {"cmd": "crew", "lat", "lon"}).
+          {"cmd": "crew", "lat", "lon"} | {"cmd": "plan", "route": "black"|"ranch"} (start route, before Start)).
 Phases: the engine starts in "ready" (no fire, margins null, nothing moves). {"cmd": "start"} -> "running":
 the scenario clock (config.SCENARIO_START, 16:20) and the fire grid start then. {"cmd": "reset"} -> "ready".
 MQTT out: engine/state every RECOMPUTE_S (format: see build_state / docs §5.5).
@@ -71,6 +71,7 @@ class MarginEngine:
         self.graph = graph
         self.fire: FireGrid | None = None                    # graph mode: created at Start
         self.phase = "ready"                                 # "ready" until {"cmd": "start"}, then "running"
+        self.start_route: str | None = config.START_ROUTE    # route the crew is on at Start; {"cmd": "plan"} sets it
         self.started_ts: float | None = None                 # unix s of Start (= SCENARIO_START)
         self.replan_ts: float | None = None                  # unix s of the last reroute, or of Start
         self._ready_xy = None                                # crew cell the ready-phase routes were planned from
@@ -179,6 +180,9 @@ class MarginEngine:
             if self.graph is not None:
                 self.fire = FireGrid(self.graph, now)        # the black at its start state = SCENARIO_START
             self.event(now, f"Scenario started ({config.SCENARIO_START})")
+        elif cmd == "plan":                                  # dashboard "Start on": black / ranch, before Start only
+            if self.phase == "ready" and data.get("route") in {r.id for r in self.routes}:
+                self.start_route, self.active = data["route"], None
         elif cmd == "reset":
             self.phase, self.started_ts, self.replan_ts = "ready", None, None
             self.fires.clear()
@@ -359,7 +363,9 @@ class MarginEngine:
         best = max(results, key=score)
         not_red = [r for r in results if status[r.route.id] != "red"]
         if self.active not in by_id:
-            self.active = (min(not_red, key=lambda r: r.eta_min) if not_red else best).route.id
+            start = by_id.get(self.start_route)
+            self.active = (start if start and status[start.route.id] != "red" else
+                           min(not_red, key=lambda r: r.eta_min) if not_red else best).route.id
         if status[self.active] == "red" and not_red:        # all red -> no reroute, NO SAFE ROUTE below
             old, best = by_id[self.active], max(not_red, key=score)
             self.event(now, f"REROUTED: {self.active} -> {best.route.id} "
@@ -435,7 +441,7 @@ class MarginEngine:
                      "walking": self.phase == "running" and self.graph is not None and config.CREW_WALK
                                 and not self.crew_external and not self.crew_arrived,
                      "arrived": self.crew_arrived},
-            "active_route": self.active,
+            "active_route": self.active, "start_route": self.start_route,
             "leave_by_ts": None if leave_by is None else round(leave_by),
             "routes": routes, "nodes": nodes, "fires": fires, "alerts": alerts,
         }

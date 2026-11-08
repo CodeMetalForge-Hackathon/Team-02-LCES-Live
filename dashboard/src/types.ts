@@ -21,6 +21,8 @@ export type EngineState = {
   started_ts?: number | null;      // unix s of Start = scenario_start
   scenario_start?: string;         // "16:20"
   replan_ts?: number | null;       // unix s of the last reroute (or of Start)
+  active_route?: string | null;
+  start_route?: string | null;     // route the crew is on at Start (null = fastest safe = the black); {"cmd":"plan"}
   routes?: {
     id: string; name?: string; to?: string; margin_min: number | null; status: RouteStatus; active: boolean;
     eta_min?: number; path?: [number, number][];

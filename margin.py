@@ -227,14 +227,23 @@ def graph_routes(g: dict, crew_xy, fire: "FireGrid | None" = None, now: float = 
     if fire is not None:
         unsafe = fire.unsafe_at(now)[g["_cell"]]
         t_fire = np.maximum(unsafe - now, 0) / config.SAFETY_FACTOR      # seconds, as in fire_min
-        closed = (unsafe <= now) | (t_fire < t)
-        for _ in range(10):              # closures only grow, so this settles; 10 is a guard
-            t, pred = dijkstra(build_graph.matrix(g, closed), indices=start, return_predecessors=True)
-            new = closed | (t_fire < t)
-            if (new == closed).all():
+        t0, paths = t, {}
+        # First keep a green margin (GREEN_MIN) around the fire; only if a zone has no such path, accept a tight one.
+        for buffer_s in (config.GREEN_MIN * 60, 0.0):
+            t = t0
+            closed = (unsafe <= now) | (t_fire < t + buffer_s)
+            for _ in range(10):          # closures only grow, so this settles; 10 is a guard
+                t, pred = dijkstra(build_graph.matrix(g, closed), indices=start, return_predecessors=True)
+                new = closed | (t_fire < t + buffer_s)
+                if (new == closed).all():
+                    break
+                closed = new
+            for k, v in targets.items():
+                paths.setdefault(k, build_graph.path_to(t, pred, start, v)[1])
+            if all(paths.values()):
                 break
-            closed = new
-        paths = {k: build_graph.path_to(t, pred, start, v)[1] or blind[k] for k, v in targets.items()}
+            paths = {k: p for k, p in paths.items() if p}
+        paths = {k: paths.get(k) or blind[k] for k in targets}
     veg = g["veg"].ravel()
     routes = []
     for rid, to, key, radius in SAFETY_ZONES:

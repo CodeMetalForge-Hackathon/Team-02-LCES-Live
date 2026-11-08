@@ -95,6 +95,11 @@ h2 {
 .controls .ignite { border-color: #6c3b37; color: #f3a79f; }
 .controls .reset.armed { background: var(--danger); border-color: var(--danger); color: #1a0605; }
 /* square icon buttons (play / ignite / reset) */
+.start-on { display: flex; align-items: center; gap: 2px; padding: 2px; border-radius: 10px; background: var(--chip); }
+.start-on span { font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 700; padding: 0 7px 0 6px; }
+.controls .start-on button { height: 30px; padding: 0 11px; border: 0; border-radius: 8px; background: transparent; color: var(--dim); font-size: .74rem; font-weight: 650; }
+.controls .start-on button.on { background: var(--elev); color: var(--text); }
+.controls .start-on button:disabled.on { opacity: 1; }
 .controls .icon-btn { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; }
 .controls .icon-btn svg { width: 17px; height: 17px; display: block; }
 .controls .icon-btn.start svg { transform: translateX(1px); } /* optical: nudge the play triangle toward its point */

@@ -22,7 +22,7 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD") or None
 ALLOW_SIMULATOR_DATA = os.getenv("ALLOW_SIMULATOR_DATA", "false").lower() in {"1", "true", "yes"}
 
 CMD_TOPIC = "engine/cmd"
-ALLOWED_CMDS = {"start", "reset", "fire"}   # dashboard buttons; "crew" etc. stay MQTT-only
+ALLOWED_CMDS = {"start", "reset", "fire", "plan"}   # dashboard buttons; "crew" etc. stay MQTT-only
 
 clients: set[WebSocket] = set()
 latest: dict[str, dict] = {}

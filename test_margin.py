@@ -24,6 +24,7 @@ from margin import (FireGrid, FirePoint, GraphTerrain, Terrain, crew_start_xy, e
 TERRAIN = Terrain()
 NODES_FILE = config.PLACEHOLDER_DIR / "nodes.json"
 ROUTES_FILE = config.PLACEHOLDER_DIR / "routes.geojson"
+config.START_ROUTE = None                   # checks assume the fastest-route start; the ranch start has its own
 CALM = dict(wind_ms=2.5, wind_dir=270)      # simulator before the shift
 SHIFT = dict(wind_ms=7.5, wind_dir=180)     # simulator after the shift
 
@@ -474,6 +475,44 @@ def test_graph_2013_story_starts_on_the_black_and_keeps_it():
         assert s["active_route"] == "black" and route_by_id(s, "black")["status"] != "red", s["routes"]
     assert route_by_id(s, "ranch")["status"] == "red"
     assert not any(a.startswith("REROUTED") for a in s["alerts"]) and s["replan_ts"] == 0
+
+
+def test_start_on_the_ranch_then_hot_n2_reroutes_to_the_black():
+    """START_ROUTE = "ranch" (where the 2013 crew went): a hot N2 cuts it -> REROUTED ranch -> black."""
+    config.START_ROUTE = "ranch"
+    try:
+        eng = graph_engine(start_at=None)
+        feed(eng, 0, wind_ms=3, wind_dir=200)
+        assert eng.compute(0)["active_route"] == "ranch"         # ready screen shows the ranch plan
+        eng.on_cmd({"cmd": "start"}, 1)
+        feed(eng, 1, wind_ms=3, wind_dir=200)
+        s = eng.compute(1)
+        assert s["active_route"] == "ranch" and s["replan_ts"] == 1
+        eng.on_wx({"type": "wx", "node": "N2", "temp_c": 55, "rh": 10, "wind_ms": -1, "wind_dir": -1}, 30)
+        feed(eng, 31, wind_ms=3, wind_dir=200)
+        s = eng.compute(31)
+        assert s["active_route"] == "black" and s["replan_ts"] == 31, s["routes"]
+        assert any(a.startswith("REROUTED: ranch -> black") for a in s["alerts"]), s["alerts"]
+        eng.on_cmd({"cmd": "reset"}, 40)
+        assert eng.compute(40)["active_route"] == "ranch"
+    finally:
+        config.START_ROUTE = None
+
+
+def test_plan_cmd_picks_the_start_route_only_before_start():
+    eng = graph_engine(start_at=None)
+    feed(eng, 0, wind_ms=3, wind_dir=200)
+    assert eng.compute(0)["start_route"] is None and eng.compute(0)["active_route"] == "black"
+    eng.on_cmd({"cmd": "plan", "route": "ranch"}, 1)
+    s = eng.compute(1)
+    assert s["start_route"] == "ranch" and s["active_route"] == "ranch"
+    eng.on_cmd({"cmd": "plan", "route": "nowhere"}, 2)            # unknown: ignored
+    eng.on_cmd({"cmd": "start"}, 3)
+    assert eng.compute(3)["active_route"] == "ranch"
+    eng.on_cmd({"cmd": "plan", "route": "black"}, 4)              # running: ignored
+    assert eng.compute(4)["active_route"] == "ranch"
+    eng.on_cmd({"cmd": "reset"}, 5)
+    assert eng.compute(5)["start_route"] == "ranch"               # the operator's choice survives Reset
 
 
 def test_graph_black_cut_reroutes_to_the_ranch():
