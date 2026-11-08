@@ -19,6 +19,7 @@ Core question the system answers, continuously:
 |---|---|---|---|
 | **Node N1: La Crosse TX145WSDTHv3 via SDR** (temp, RH, wind speed, wind direction) | **Working end to end: readings seen on the Pi broker** (verified as `W1`, renamed `N1`; §1.3) | TBD | Fan test of direction; measure transmit interval; move SDR to the Pi |
 | Node N2: XIAO ESP32-S3 + DHT11 (`firmware/weather-node`) (temp, RH) | **Working:** joins FireNet (−35 dBm with antenna), heartbeat to `sensors/N2/wx` every 10 s accepted by the Pi broker (verified Sat Nov 7) | TBD | — |
+| Node N3: XIAO ESP32-C5 + DHT11 (`firmware/`, env `node_n3`) (temp, RH) | **Partly working:** joins FireNet (−36 dBm with antenna), heartbeat to `sensors/N3/wx` every 10 s seen on the Pi broker (verified Sat Nov 7). **DHT11 not read yet:** sends `temp_c -99`, `rh -1` (§8.3.2) | Vivek | Fix the DHT11 wiring rows, then confirm real values on the Pi |
 | Pi 5 base: OS, packages, Mosquitto | Done and verified | Vivek | — |
 | FireNet hotspot on the Pi | **On**; Pi = `10.42.1.1` on FireNet (verified by the wind bridge) | Vivek | Point all ESP32s at `10.42.1.1` |
 | Laptop ↔ Pi SSH over Ethernet | Done, VS Code Remote-SSH works | Vivek | Share access with the team |
@@ -77,7 +78,7 @@ JSON; `-1` / `-99` = no data yet. Nodes have no reliable clock, so the Pi adds i
 {"type":"crew","id":"C1","x":10.0,"y":55.0}
 ```
 - `seq` counts heartbeats per node. `wind_dir` = direction the wind blows **from**, degrees. `wind_ms` = m/s.
-- **Demo nodes (2):** `N1` = La Crosse sensor via SDR, sends **temp, RH, wind speed and wind direction** (§1.3). `N2` = ESP32-S3 + DHT11, sends **temp and RH** only (§8.3). The simulator also uses `N1`–`N3` (§8.4).
+- **Demo nodes (3):** `N1` = La Crosse sensor via SDR, sends **temp, RH, wind speed and wind direction** (§1.3). `N2` = ESP32-S3 + DHT11, sends **temp and RH** only (§8.3.1). `N3` = ESP32-C5 + DHT11, sends **temp and RH** only (§8.3.2). The simulator also uses `N1`–`N3` (§8.4).
 
 ### 1.2.1 Backend implementation update (local, Nov 8)
 
@@ -99,6 +100,12 @@ Local Docker development services: `fireguard-mqtt` exposes Mosquitto at `127.0.
 **Real-data test status:** not yet confirmed end-to-end from the Pi broker. A laptop on FireNet must set `MQTT_HOST=10.42.1.1`, stop `simulator.py`, restart `ingest.py` and `ws_server.py`, and confirm incoming W1/N1/N2/N3 rows. On the Pi itself, use `MQTT_HOST=127.0.0.1` because Mosquitto is local.
 
 `simulator.py` now adds `"_simulated": true` to its messages. The two services ignore marked simulator messages by default (`ALLOW_SIMULATOR_DATA=false`), so a live run will not pollute the dashboard cache or database. Set `ALLOW_SIMULATOR_DATA=true` only for intentional offline simulator testing. This marker is specific to the project simulator; real sensor messages remain unchanged.
+
+**Known issues from code review (Sat Nov 7 evening, not fixed yet):**
+1. **Readings are dropped after a node restarts.** `readings` has `UNIQUE (node_id, seq)` and `ingest.py` inserts with `ON CONFLICT DO NOTHING`. Every node restarts `seq` at 0 on reboot or power loss (ESP32 nodes, and the wind bridge when it restarts). From then on, its new readings are silently discarded until `seq` passes the old maximum. `nodes.last_seen` still updates and `ingest.py` still prints `Saved <node> seq=…`, so it is easy to miss. This hits the grey-node demo (unplug a node, plug it back). Suggested fix: drop the unique constraint. QoS 0 MQTT never redelivers, so the duplicates it guards against don't occur. Alternative: add a per-boot id to the payload.
+2. `ws_server.py` waits with `websocket.receive()`. After a client disconnects, the next `receive()` raises `RuntimeError` instead of `WebSocketDisconnect`, so every closed dashboard tab logs an error (functionally harmless). Fix: use `receive_text()`.
+3. Pi deployment: `uv sync` needs internet, but with FireNet on the Pi has none, and `python-dotenv` is a new dependency. Sync before turning FireNet on. `/home/thunder/fire` is the older `uv init` project, not a clone of this repo; decide whether to clone the repo there or copy the files.
+4. `.env.example` uses database port `5432`; the local Docker PostGIS above is on `5433`.
 
 ### 1.3 Node N1: La Crosse TX145WSDTHv3 over SDR (working)
 We could not get an anemometer + vane for the ESP32, so we use the outdoor unit of a **La Crosse S81120v2** station (model **TX145WSDTHv3**, FCC ID OMOTX145WSDTHv3, 433 MHz, 3×AA + solar). It sends wind speed, wind direction, temperature and humidity, so it is a complete weather node by itself.
@@ -423,24 +430,66 @@ allow_anonymous true
   Connect: `ssh thunder@10.42.0.1` (password: ask Vivek; reset with `sudo passwd thunder`). Passwordless: `ssh-copy-id thunder@10.42.0.1` (don't overwrite your key with `ssh-keygen`); from Windows PowerShell: `type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh thunder@10.42.0.1 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"`. WSL and Windows keep separate keys; VS Code uses the Windows one.
 - **VS Code Remote-SSH:** "Remote - SSH" extension → F1 → Remote-SSH: Connect to Host → `thunder@10.42.0.1` → Open Folder `/home/thunder/fire`. Install the Python extension "in SSH" and select `./.venv`.
 
-### 8.3 Node N2 (ESP32)
+### 8.3 ESP32 nodes (N2, N3)
+
+#### 8.3.1 N2: XIAO ESP32-S3
 **Node N2 is a XIAO ESP32-S3** with the PlatformIO firmware in `firmware/weather-node` (DHT11 on D3, LED on D4, node ID `N2`, Wi-Fi FireNet → `10.42.1.1`). Build/flash: `cd firmware/weather-node && pio run -t upload && pio device monitor`. At boot it prints FireNet's signal strength, and while connecting the Wi-Fi status (1 = network not seen, 4 = connect failed / password, 6 = disconnected / retrying). **The XIAO ESP32-S3 needs its U.FL antenna attached:** without it FireNet showed −82 dBm and it never connected (status 6); with it −35 dBm and it connected at once.
 
-Earlier ESP32-C5 notes, kept for reference:
+#### 8.3.2 N3: XIAO ESP32-C5 (Vivek, Sat Nov 7 evening)
+**Status:** Wi-Fi + MQTT heartbeat **working**; DHT11 reading **not working yet** (sends `-99`/`-1`).
 
-Grove DHT11 on D0 (GPIO1), powered from 3V3 (never 5V), Grove-to-male-jumper cable, XIAO straddling the breadboard's centre gap.
+**Toolchain: PlatformIO project in `firmware/`** (open the `firmware` folder itself in VS Code; `firmware/weather-node` is a separate project for N2).
+- Platform: Seeed's `https://github.com/Seeed-Studio/platform-seeedboards.git#1.1.1` (arduino-esp32 core 3.3.7), board `seeed-xiao-esp32-c5`. The official PlatformIO `espressif32` platform does not support the C5. The board definition already sets `ARDUINO_USB_MODE=1` and `ARDUINO_USB_CDC_ON_BOOT=1`, so `Serial` goes over USB-C with no extra flags.
+- One-time install: `pio pkg install -g -p "https://github.com/Seeed-Studio/platform-seeedboards.git#1.1.1"`. The first build downloads ~3–4 GB.
+- Linux, one-time: install PlatformIO's udev rules (they include Espressif `303a:1001`) and `sudo usermod -aG dialout $USER`, then log out and back in.
+- Each test is its own environment with its own folder in `firmware/src/`. Run it from the PlatformIO sidebar: *env → General → Upload and Monitor*.
 
-| DHT11 pin | Wire | XIAO pin |
+| Env | Purpose | Result (Sat Nov 7) |
 |---|---|---|
-| GND | Black | GND |
-| VCC | Red | 3V3 |
-| SIG | Yellow | D0 = GPIO1 |
-| NC | White | Not connected |
+| `c5_alive` | Smoke test: chip info + uptime over USB | ✅ ESP32-C5 rev 1.0, 8 MB flash, 8 MB PSRAM, core 3.3.7 |
+| `lib_check` | Compile-only: all libraries build for the C5 | ✅ builds (DHT, DHTesp, PubSubClient, ArduinoJson, WiFi) |
+| `led_test` | Blink the Grove LED module on **D1** | ✅ blinks |
+| `led_test_d0` | Same LED test on **D0**, to check the DHT11 wiring by swapping the LED module onto the DHT11's cable | Not run yet |
+| `dht_diag` | Checks which pin the sensor is on, then reads the DHT11 every 2.5 s over USB | ⚠ see "What didn't work" |
+| `node_n3` | **The real node:** heartbeat to `sensors/N3/wx` every 10 s | ✅ heartbeats reach the Pi; ❌ DHT11 values missing |
 
-- With USB-C at the top: left side = D0…D6 (top to bottom), right side = 5V, GND, 3V3, D10…D7. With USB-C toward you the sides swap.
-- Pin map: D0 = GPIO1, D1 = GPIO0, D2 = GPIO25 (strapping, avoid), D3 = GPIO7 (strapping, avoid), D4 = GPIO23 (SDA), D5 = GPIO24 (SCL), D6 = GPIO11 (TX). **Avoid strapping pins GPIO2, 3, 7, 25, 26, 27, 28.**
-- Arduino IDE 2.3.10, board "ESP32C5 Dev Module", Serial Monitor 115200. Libraries: "DHT sensor library" (Adafruit) + "Adafruit Unified Sensor"; MQTT: PubSubClient (Nick O'Leary). With Dev Module selected use `#define DHTPIN 1` (`D0` only exists with board "XIAO_ESP32C5"). Fallback library: "DHT sensor library for ESPx" (beegee_tokyo).
-- Lessons: program prints appear in the Serial Monitor, not the Output panel. `DHTPIN 25` (D2, strapping) caused "Sensor reading failed". Grove-to-Grove cables don't fit the XIAO. XIAO on one half of the breadboard shorts left and right pins. Upload stuck: hold BOOT, tap RESET, release BOOT, upload again.
+**Wiring** (USB-C at the top, XIAO straddling the centre gap, its top pin pair in breadboard **row 1**, so pins occupy rows 1–7):
+
+| Module | Wire | XIAO pin | Breadboard row |
+|---|---|---|---|
+| DHT11 (Grove "Temperature&Humidity Sensor v1.2") | Yellow (SIG) | **D0** = GPIO1 | row 1, left side |
+| | Black (GND) | **GND** | row 2, right side |
+| | Red (VCC) | **3V3** (never 5V) | row 3, right side |
+| | White (NC) | not connected | — |
+| Grove LED module (optional status light) | Yellow (SIG) | **D1** = GPIO0 | row 2, left side |
+| | Black / Red | GND / 3V3 | rows 2 / 3, right side (shared with the DHT11) |
+
+⚠ **Row 1 on the right side is 5V.** Nothing goes there.
+
+- Pin map: D0 = GPIO1, D1 = GPIO0, D2 = GPIO25 (strapping, avoid), D3 = GPIO7 (strapping, avoid), D4 = GPIO23 (SDA), D5 = GPIO24 (SCL), D6 = GPIO11 (TX); onboard LED = GPIO27. **Avoid strapping pins GPIO2, 3, 7, 25, 26, 27, 28.** Confirmed against the core's `variants/XIAO_ESP32C5/pins_arduino.h`.
+
+**`node_n3` behaviour** (`firmware/src/node_n3/main.cpp`): Wi-Fi FireNet → MQTT `10.42.1.1:1883`, client id `N3`, topic `sensors/N3/wx`, §1.2 format. The first heartbeat goes out right after connecting, then every 10 s. At boot it prints whether FireNet is visible and its signal strength. If the DHT11 read fails it **still publishes**, with `temp_c -99` and `rh -1`, so the node stays alive and the sensor shows "no data". (N2 skips the heartbeat instead, which makes the node look dead.) Status LED on D1: blinking once per second = connecting; short flash every 10 s = heartbeat delivered.
+
+**What worked (verified Sat Nov 7):**
+- Upload and USB serial on Linux (`/dev/ttyACM0`, sometimes `/dev/ttyACM1` after a re-plug).
+- `led_test` on D1.
+- `node_n3`: `wifi: saw FireNet rssi -36 dBm ch 11` → connected in ~6 s → IP `10.42.1.64` → `mqtt: connected` → `sensors/N3/wx` received on the Pi (`mosquitto_sub -h localhost -t 'sensors/N3/#' -v`), `seq` continuous (10 → 17).
+
+**What didn't work (open):**
+- **DHT11 not read on N3.** Heartbeats carry `temp_c -99`, `rh -1`. `dht_diag` reports `D0=LOW D1=LOW` at idle, with the chip's internal pull-down on. A powered Grove DHT11 module should pull its signal pin HIGH, so the sensor is probably **not powered or not in the D0 row**. A photo suggests the black (GND) jumper may sit in **row 1 on the right side, which is 5V**, instead of row 2. Next: check the three rows against the table above. Then run `led_test_d0` with the LED module clipped onto the DHT11's cable (blinks = wiring right, so the sensor is the problem; dark = wiring wrong). Then re-flash `node_n3`.
+- **`dht_diag` freezes after printing `step 2: starting the DHT library...`** Cause unknown. An earlier version also froze, at `analogReadMilliVolts()` or in the DHTesp library. The step-1 pin check before the freeze is still valid. Don't use the DHTesp (beegee_tokyo) library on the C5. The Adafruit DHT library runs fine inside `node_n3`.
+
+**Harmless messages (ignore):**
+- Boot log `E (1019) MSPI Timing: Failed to allocate dummy cacheline for PSRAM memory barrier!`. PSRAM is still detected (8 MB), and nothing uses PSRAM.
+- Compiler warning `invalid suffix on literal` in `periph_ctrl.h` (from Espressif's own headers).
+- `esptool` "Deprecated: Choice 'default_reset'" warnings.
+
+**Lessons**
+- **Attach the U.FL antenna**, as on N2.
+- `Could not exclusively lock port /dev/ttyACM…` = an old *Upload and Monitor* terminal still holds the port. Press **Ctrl+C** in every old monitor before uploading again.
+- `Auto-detected: /dev/ttyS0` = the board is **not on USB** (cable unplugged or loose). Check `ls /dev/ttyACM*`.
+- The port can renumber (`ttyACM0` ↔ `ttyACM1`) after a re-plug. PlatformIO auto-detects it.
+- Earlier Arduino IDE lessons (C5): `DHTPIN 25` (D2, strapping) caused "Sensor reading failed". Grove-to-Grove cables don't fit the XIAO, so use Grove-to-male-jumper. A XIAO on one half of the breadboard shorts left and right pins. Upload stuck: hold BOOT, tap RESET, release BOOT, upload again.
 
 ### 8.4 Simulator
 `~/fire/simulator.py` on the Pi pretends to be N1–N3, so backend and dashboard can be built before the hardware. Code in Appendix A. Every 10 s it publishes one heartbeat per node to `sensors/<node>/wx`, and acts out the two demo situations:
@@ -469,6 +518,9 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 
 **Next steps**
 - [x] ESP32-S3 node: on FireNet, publishing heartbeats (as `N2`, verified Sat Nov 7)
+- [x] ESP32-C5 node `N3`: PlatformIO setup, on FireNet, heartbeats on the Pi broker (verified Sat Nov 7)
+- [ ] N3: fix DHT11 wiring (rows 1/2/3, §8.3.2) so `temp_c`/`rh` stop being `-99`/`-1`
+- [ ] Backend: fix the readings-dropped-after-reboot issue and the `receive()` log noise (§1.2.1 known issues)
 - [ ] N1 (La Crosse): fan test for direction, measure transmit interval, move SDR + bridge to the Pi (§1.3)
 - [x] Local PostGIS schema + `ingest.py` (MQTT → database) implemented and verified with simulator data
 - [x] `ws_server.py` working locally against the simulator; latest-message HTTP cache verified
@@ -486,7 +538,7 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - Tabletop size, `SCALE`, origin `E0/N0`, and Yarnell patch (§1.4).
 - Worst-case numbers `WORST_WIND_MS`, `WORST_TEMP_C`, `WORST_RH` (§5.3).
 - N1 (La Crosse) transmit interval, and whether its `wind_dir` is "from" (§1.3).
-- `batt` units: the simulator sends 90 (percent?); N1 (La Crosse) sends 100/10 for ok/low; N2 sends -1. Confirm what the dashboard expects.
+- `batt` units: the simulator sends 90 (percent?); N1 (La Crosse) sends 100/10 for ok/low; N2 and N3 send -1. Proposal: percent 0–100, -1 = unknown (all current senders already fit). Confirm what the dashboard expects.
 - Which LoRa module does the shared library have (SX1262 or SX1276)?
 - Which thermal camera (MLX90640, FLIR Lepton, other)? Decides the Python driver.
 - Is pre-written code / pre-built hardware allowed? Ask the organizers.
@@ -497,7 +549,8 @@ On the Pi, the dashboard connects to `ws://10.42.1.1:8000/ws` (FireNet) or `ws:/
 - Venue Wi-Fi isolates devices: use FireNet (`10.42.1.1`) or the cable (`10.42.0.1`).
 - FireNet has no internet, and turning it on takes the Pi off venue Wi-Fi. Install packages first (Pi and laptop).
 - New terminals on the Pi: `cd ~/fire` and use `uv run`, or activate `.venv`.
-- **Don't run the simulator alongside the real nodes:** it also publishes `sensors/N1/wx` and `sensors/N2/wx`.
+- **Don't run the simulator alongside the real nodes:** it also publishes `sensors/N1/wx`, `sensors/N2/wx` and `sensors/N3/wx`. `ingest.py` and `ws_server.py` ignore its messages (`_simulated`), but `mosquitto_sub` and any other subscriber still see them mixed in.
+- ESP32 serial port "busy" / "could not exclusively lock": an old PlatformIO monitor still holds it. Ctrl+C every old *Upload and Monitor* terminal first (§8.3.2).
 - `mosquitto_sub` looks stuck when nothing is publishing; it is just waiting (Ctrl+C to stop).
 - paho-mqtt 2.x needs `mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)`.
 - SDR: only one program can hold the dongle (`usb_claim_interface error -6`); the La Crosse id changes on battery swap (§1.3).
